@@ -8,10 +8,10 @@ import telebot
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-TIMEFRAME_LIVE = '15m'      # Timeframe eksekusi
-TIMEFRAME_MACRO = '1h'      # Timeframe tren besar (Filter Tren)
-CANDLE_COUNT = 50          # Ditingkatkan ke 50 sesuai instruksi
-VOLUME_MULTIPLIER = 1.5    # Lonjakan volume minimal 1.5x lipat
+TIMEFRAME_LIVE = '15m'      
+TIMEFRAME_MACRO = '1h'      
+CANDLE_COUNT = 50          
+VOLUME_MULTIPLIER = 1.5    
 # =======================================================
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
@@ -20,10 +20,9 @@ exchange = ccxt.okx({'options': {'defaultType': 'swap'}, 'enableRateLimit': True
 pair_states = {}
 active_pairs = []
 
-# --- SECTION 1: MATHEMATICAL UTILITIES (Tanpa Library Berat) ---
+# --- SECTION 1: MATHEMATICAL UTILITIES ---
 
 def calculate_ema(prices, period=200):
-    """Menghitung EMA secara manual"""
     if len(prices) < period: return 0.0
     k = 2 / (period + 1)
     ema = prices[0]
@@ -32,7 +31,6 @@ def calculate_ema(prices, period=200):
     return ema
 
 def calculate_rsi(prices, period=14):
-    """Menghitung RSI secara manual untuk filter Overbought/Oversold"""
     if len(prices) < period + 1: return 50.0
     gains = []
     losses = []
@@ -54,7 +52,11 @@ def calculate_rsi(prices, period=14):
     rs = avg_gain / avg_loss
     return 100.0 - (100.0 / (1.0 + rs))
 
-# --- SECTION 2: TELEGRAM COMMANDS ---
+# --- SECTION 2: TELEGRAM COMMANDS DEFINITIONS ---
+
+def run_telegram_bot():
+    print("Telegram Command Listener aktif...")
+    bot.infinity_polling()
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
@@ -99,7 +101,6 @@ def send_active_patterns(message):
         text += f"• *{symbol.replace('-USDT-SWAP','')}*: {emoji} | Level: `{level}`\n"
     bot.reply_to(message, text, parse_mode='Markdown')
 
-# --- SECTION 3: BACKTEST COMMAND WITH ALL FILTERS ---
 @bot.message_handler(commands=['backtest'])
 def handle_backtest_command(message):
     args = message.text.split()
@@ -113,11 +114,6 @@ def handle_backtest_command(message):
 
     try:
         candles = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME_LIVE, limit=1000)
-        
-        # Tarik data makro juga untuk keperluan backtest tren historis
-        macro_candles = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME_MACRO, limit=300)
-        macro_closes = [c[4] for c in macro_candles]
-        
         total_trades, wins, losses = 0, 0, 0
         state = 'NONE'
         trigger_level, sl_level, tp_level = 0.0, 0.0, 0.0
@@ -126,30 +122,22 @@ def handle_backtest_command(message):
             current_high, current_low, current_close = candles[i][2], candles[i][3], candles[i][4]
             prev_close = candles[i-1][4]
             
-            # 1. Parameter Candle Count ditingkatkan ke 50
             hist_candles = candles[i - CANDLE_COUNT - 2 : i - 1]
             resistance = max([c[2] for c in hist_candles])
             support = min([c[3] for c in hist_candles])
             
-            # 2. Filter Volume
             avg_volume = sum([c[5] for c in hist_candles]) / len(hist_candles)
             breakout_volume = candles[i-1][5]
             volume_valid = breakout_volume > (avg_volume * VOLUME_MULTIPLIER)
             
-            # 3. Filter Tren Makro (Simulasi sederhana berbasis close indeks data makro paralel)
-            # Untuk akurasi backtest sempurna tanpa desinkronisasi indeks, kita gunakan basis estimasi EMA lokal
             local_closes = [c[4] for c in candles[:i]]
             current_ema200_macro = calculate_ema(local_closes, period=200) 
-            
-            # 4. Filter RSI
             current_rsi = calculate_rsi(local_closes, period=14)
 
             if state == 'NONE':
-                # Bullish Breakout harus di atas EMA 200 & RSI belum Overbought (< 70)
                 if prev_close > resistance and volume_valid and current_close > current_ema200_macro and current_rsi < 70:
                     state = 'BREAKOUT_BULLISH'
                     trigger_level = resistance
-                # Bearish Breakdown harus di bawah EMA 200 & RSI belum Oversold (> 30)
                 elif prev_close < support and volume_valid and current_close < current_ema200_macro and current_rsi > 30:
                     state = 'BREAKOUT_BEARISH'
                     trigger_level = support
@@ -160,7 +148,7 @@ def handle_backtest_command(message):
                     sl_level = support
                     risk = current_close - sl_level
                     if risk <= 0: risk = current_close * 0.005
-                    tp_level = current_close + (risk * 2) # RR 1:2
+                    tp_level = current_close + (risk * 2)
                     total_trades += 1
                 elif current_close < trigger_level * 0.995:
                     state = 'NONE'
@@ -171,7 +159,7 @@ def handle_backtest_command(message):
                     sl_level = resistance
                     risk = sl_level - current_close
                     if risk <= 0: risk = current_close * 0.005
-                    tp_level = current_close - (risk * 2) # RR 1:2
+                    tp_level = current_close - (risk * 2)
                     total_trades += 1
                 elif current_close > trigger_level * 1.005:
                     state = 'NONE'
@@ -210,11 +198,9 @@ def handle_backtest_command(message):
 
 def scan_breakout_retest(symbol):
     try:
-        # Data Live 15m
         candles = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME_LIVE, limit=CANDLE_COUNT + 5)
         if len(candles) < CANDLE_COUNT: return
 
-        # Data Makro 1h untuk Cek Filter Tren
         macro_candles = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME_MACRO, limit=205)
         macro_closes = [c[4] for c in macro_candles]
         ema200_macro = calculate_ema(macro_closes, period=200)
@@ -223,24 +209,20 @@ def scan_breakout_retest(symbol):
         current_close, current_low, current_high = current_candle[4], current_candle[3], current_candle[2]
         prev_close = prev_candle[4]
 
-        # 1. Ambil 50 Candle Historis untuk S&R
         historical_candles = candles[-52:-2]
         resistance = max([c[2] for c in historical_candles])
         support = min([c[3] for c in historical_candles])
 
-        # 2. Filter Volume
         avg_volume = sum([c[5] for c in historical_candles]) / len(historical_candles)
         breakout_volume = prev_candle[5]
         volume_valid = breakout_volume > (avg_volume * VOLUME_MULTIPLIER)
 
-        # 4. Filter RSI
         live_closes = [c[4] for c in candles]
         current_rsi = calculate_rsi(live_closes, period=14)
 
         if symbol not in pair_states:
             pair_states[symbol] = {'status': 'NONE', 'level': 0.0}
 
-        # --- LOGIKA BULLISH DENGAN FILTER KETAT ---
         if prev_close > resistance and volume_valid and current_close > ema200_macro and current_rsi < 70:
             if pair_states[symbol]['status'] != 'BREAKOUT_BULLISH':
                 pair_states[symbol] = {'status': 'BREAKOUT_BULLISH', 'level': resistance}
@@ -252,7 +234,6 @@ def scan_breakout_retest(symbol):
                 bot.send_message(TELEGRAM_CHAT_ID, f"🎯 *RETEST SUCCESS (ENTRY LONG)*\n\nPair: `{symbol}`\nHarga memantul sukses di level: {target_res}\n*Rekomendasi:* Open Posisi LONG (RR 1:2). Put SL di bawah support terdekat.", parse_mode='Markdown')
                 pair_states[symbol] = {'status': 'NONE', 'level': 0.0}
 
-        # --- LOGIKA BEARISH DENGAN FILTER KETAT ---
         elif prev_close < support and volume_valid and current_close < ema200_macro and current_rsi > 30:
             if pair_states[symbol]['status'] != 'BREAKOUT_BEARISH':
                 pair_states[symbol] = {'status': 'BREAKOUT_BEARISH', 'level': support}
@@ -264,7 +245,6 @@ def scan_breakout_retest(symbol):
                 bot.send_message(TELEGRAM_CHAT_ID, f"🎯 *RETEST SUCCESS (ENTRY SHORT)*\n\nPair: `{symbol}`\nHarga memantul sukses di level: {target_sup}\n*Rekomendasi:* Open Posisi SHORT (RR 1:2). Put SL di atas resistance terdekat.", parse_mode='Markdown')
                 pair_states[symbol] = {'status': 'NONE', 'level': 0.0}
 
-        # Reset jika terindikasi fakeout mendadak
         if pair_states[symbol]['status'] == 'BREAKOUT_BULLISH' and current_close < target_res * 0.995:
             pair_states[symbol] = {'status': 'NONE', 'level': 0.0}
         elif pair_states[symbol]['status'] == 'BREAKOUT_BEARISH' and current_close > target_sup * 1.005:
@@ -273,16 +253,19 @@ def scan_breakout_retest(symbol):
     except Exception as e:
         print(f"Error scan {symbol}: {e}")
 
+# --- SECTION 5: MAIN EXECUTION ---
+
 def main():
     print("Memulai aplikasi...")
     try:
         exchange.load_markets()
         all_futures = [symbol for symbol in exchange.symbols if '-USDT-SWAP' in symbol]
         global active_pairs
-        active_pairs = all_futures[:15] # Ambil 15 koin teraktif
+        active_pairs = all_futures[:15] 
     except Exception as e:
         print(f"Gagal memuat pasar OKX: {e}")
 
+    # run_telegram_bot didefinisikan di atas, jadi pemanggilan thread ini aman
     tele_thread = threading.Thread(target=run_telegram_bot)
     tele_thread.daemon = True
     tele_thread.start()
