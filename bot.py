@@ -112,7 +112,7 @@ def pairs_category_keyboard():
     return markup
 
 # =======================================================
-# 📑 TELEGRAM TEXT COMMANDS & REPLY KEYBOARD INTERCEPTORS
+# 📑 TELEGRAM TEXT COMMANDS DEFINITIONS
 # =======================================================
 
 @bot.message_handler(commands=['start', 'help'])
@@ -123,9 +123,99 @@ def send_welcome(message):
     )
     bot.send_message(message.chat.id, welcome_text, parse_mode='Markdown', reply_markup=main_menu_keyboard())
 
+
+# --- PINDAHKAN LOGIKA BACKTEST KE SINI (DI ATAS HANDLER UTAMA) ---
+@bot.message_handler(commands=['backtest'])
+def handle_backtest_command(message):
+    args = message.text.split()
+    if len(args) < 2:
+        bot.reply_to(message, "⚠️ Format: `/backtest <KOIN>` (Contoh: `/backtest BTC`)", parse_mode='Markdown')
+        return
+
+    coin_name = args[1].upper().strip()
+    symbol = f"{coin_name}-USDT-SWAP"
+    loading_msg = bot.reply_to(message, f"⏳ _Menghitung Winrate premium untuk {symbol}..._", parse_mode='Markdown')
+
+    try:
+        candles = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME_LIVE, limit=1000)
+        total_trades, wins, losses = 0, 0, 0
+        state = 'NONE'
+        trigger_level, sl_level, tp_level = 0.0, 0.0, 0.0
+
+        for i in range(CANDLE_COUNT + 2, len(candles)):
+            current_high, current_low, current_close = candles[i][2], candles[i][3], candles[i][4]
+            prev_close = candles[i-1][4]
+            
+            hist_candles = candles[i - CANDLE_COUNT - 2 : i - 1]
+            resistance = max([c[2] for c in hist_candles])
+            support = min([c[3] for c in hist_candles])
+            
+            avg_volume = sum([c[5] for c in hist_candles]) / len(hist_candles)
+            breakout_volume = candles[i-1][5]
+            volume_valid = breakout_volume > (avg_volume * VOLUME_MULTIPLIER)
+            
+            local_closes = [c[4] for c in candles[:i]]
+            current_ema200_macro = calculate_ema(local_closes, period=200) 
+            current_rsi = calculate_rsi(local_closes, period=14)
+
+            if state == 'NONE':
+                if prev_close > resistance and volume_valid and current_close > current_ema200_macro and current_rsi < 70:
+                    state = 'BREAKOUT_BULLISH'
+                    trigger_level = resistance
+                elif prev_close < support and volume_valid and current_close < current_ema200_macro and current_rsi > 30:
+                    state = 'BREAKOUT_BEARISH'
+                    trigger_level = support
+
+            elif state == 'BREAKOUT_BULLISH':
+                if current_low <= trigger_level * 1.001 and current_close > trigger_level:
+                    state = 'IN_LONG'
+                    sl_level = support
+                    risk = current_close - sl_level
+                    if risk <= 0: risk = current_close * 0.005
+                    tp_level = current_close + (risk * 2)
+                    total_trades += 1
+                elif current_close < trigger_level * 0.995:
+                    state = 'NONE'
+
+            elif state == 'BREAKOUT_BEARISH':
+                if current_high >= trigger_level * 0.999 and current_close < trigger_level:
+                    state = 'IN_SHORT'
+                    sl_level = resistance
+                    risk = sl_level - current_close
+                    if risk <= 0: risk = current_close * 0.005
+                    tp_level = current_close - (risk * 2)
+                    total_trades += 1
+                elif current_close > trigger_level * 1.005:
+                    state = 'NONE'
+
+            elif state == 'IN_LONG':
+                if current_low <= sl_level: losses += 1; state = 'NONE'
+                elif current_high >= tp_level: wins += 1; state = 'NONE'
+
+            elif state == 'IN_SHORT':
+                if current_high >= sl_level: losses += 1; state = 'NONE'
+                elif current_low <= tp_level: wins += 1; state = 'NONE'
+
+        winrate = (wins / total_trades * 100) if total_trades > 0 else 0.0
+        
+        report_text = (
+            f"📊 *LAPORAN WINRATE (PREMIUM FILTER)*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Aset: `{symbol}` | TF: `{TIMEFRAME_LIVE}`\n"
+            f"🔹 Total Sinyal Valid: *{total_trades}*\n"
+            f"🟢 Profit (Wins): *{wins}* | 🔴 Loss: *{losses}*\n\n"
+            f"🎯 *OPTIMIZED WIN RATE: {winrate:.2f}%* 🔥"
+        )
+        bot.delete_message(message.chat.id, loading_msg.message_id)
+        bot.reply_to(message, report_text, parse_mode='Markdown')
+    except Exception as e:
+        bot.delete_message(message.chat.id, loading_msg.message_id)
+        bot.reply_to(message, f"❌ Error Backtest: `{str(e)}`", parse_mode='Markdown')
+
+# --- KINI INTERCEPTOR UTAMA DILETAK KAN DI PALING BAWAH SEBAGAI JALUR AKHIR ---
 @bot.message_handler(func=lambda msg: True)
 def handle_reply_keyboard(message):
-    """Menangkap ketukan teks dari Reply Keyboard dan mengarahkannya ke fungsi yang sesuai"""
+    """Menangkap ketukan teks dari Reply Keyboard"""
     text = message.text
     
     if text == "🔍 Pantauan Koin":
@@ -143,6 +233,7 @@ def handle_reply_keyboard(message):
         send_trade_history(message)
     elif text == "🤖 Status Sistem":
         bot.reply_to(message, f"✅ *Bot Status:* Online.\n🎯 *Engine:* Memantau {len(active_pairs)} koin dengan volume tertinggi secara live.", parse_mode='Markdown')
+
 
 # --- REFACTORING UTILITY FUNCTIONS FOR COMMANDS ---
 
