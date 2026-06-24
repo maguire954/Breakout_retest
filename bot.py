@@ -241,16 +241,60 @@ def handle_backtest_command(message):
 
 def scan_breakout_retest(symbol):
     try:
+        # 1. Ambil data candle live
         candles = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME_LIVE, limit=CANDLE_COUNT + 5)
         if len(candles) < CANDLE_COUNT: return
 
+        current_candle, prev_candle = candles[-1], candles[-2]
+        current_close = current_candle[4]
+        current_low = current_candle[3]
+        current_high = current_candle[2]
+        prev_close = prev_candle[4]
+
+        # Inisialisasi state jika koin baru masuk radar
+        if symbol not in pair_states:
+            pair_states[symbol] = {'status': 'NONE', 'level': 0.0, 'sl': 0.0, 'tp': 0.0}
+
+        # ======================================================================
+        # PANTALAN 1: JIKA SEDANG DALAM POSITION (MENUNGGU TP / SL)
+        # ======================================================================
+        if pair_states[symbol]['status'] == 'IN_LONG':
+            sl_level = pair_states[symbol]['sl']
+            tp_level = pair_states[symbol]['tp']
+            
+            if current_low <= sl_level:
+                bot.send_message(TELEGRAM_CHAT_ID, f"🔴 *TRADE CLOSED (STOP LOSS)*\n\nPair: `{symbol}`\nHarga menyentuh SL di level: `{sl_level}`. Tetap disiplin dengan risikonya.", parse_mode='Markdown')
+                pair_states[symbol] = {'status': 'NONE', 'level': 0.0, 'sl': 0.0, 'tp': 0.0}
+                return
+            elif current_high >= tp_level:
+                bot.send_message(TELEGRAM_CHAT_ID, f"🟢 *TRADE CLOSED (TAKE PROFIT) 🔥*\n\nPair: `{symbol}`\nHarga sukses meroket menyentuh TP di level: `{tp_level}` (RR 1:2)!", parse_mode='Markdown')
+                pair_states[symbol] = {'status': 'NONE', 'level': 0.0, 'sl': 0.0, 'tp': 0.0}
+                return
+            else:
+                return # Skip proses pencarian breakout karena posisi masih floating berjalan
+
+        if pair_states[symbol]['status'] == 'IN_SHORT':
+            sl_level = pair_states[symbol]['sl']
+            tp_level = pair_states[symbol]['tp']
+            
+            if current_high >= sl_level:
+                bot.send_message(TELEGRAM_CHAT_ID, f"🔴 *TRADE CLOSED (STOP LOSS)*\n\nPair: `{symbol}`\nHarga menyentuh SL di level: `{sl_level}`. Evaluasi kembali setupnya.", parse_mode='Markdown')
+                pair_states[symbol] = {'status': 'NONE', 'level': 0.0, 'sl': 0.0, 'tp': 0.0}
+                return
+            elif current_low <= tp_level:
+                bot.send_message(TELEGRAM_CHAT_ID, f"🟢 *TRADE CLOSED (TAKE PROFIT) 🔥*\n\nPair: `{symbol}`\nHarga sukses longsor menyentuh TP di level: `{tp_level}` (RR 1:2)!", parse_mode='Markdown')
+                pair_states[symbol] = {'status': 'NONE', 'level': 0.0, 'sl': 0.0, 'tp': 0.0}
+                return
+            else:
+                return # Skip proses pencarian breakout karena posisi masih floating berjalan
+
+
+        # ======================================================================
+        # PANTALAN 2: JIKA STATUS 'NONE' ATAU 'BREAKOUT' (PROSES SCANNING SEPERTI BIASA)
+        # ======================================================================
         macro_candles = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME_MACRO, limit=205)
         macro_closes = [c[4] for c in macro_candles]
         ema200_macro = calculate_ema(macro_closes, period=200)
-
-        current_candle, prev_candle = candles[-1], candles[-2]
-        current_close, current_low, current_high = current_candle[4], current_candle[3], current_candle[2]
-        prev_close = prev_candle[4]
 
         historical_candles = candles[-52:-2]
         resistance = max([c[2] for c in historical_candles])
@@ -263,35 +307,50 @@ def scan_breakout_retest(symbol):
         live_closes = [c[4] for c in candles]
         current_rsi = calculate_rsi(live_closes, period=14)
 
-        if symbol not in pair_states:
-            pair_states[symbol] = {'status': 'NONE', 'level': 0.0}
-
+        # --- DETEKSI BREAKOUT INDUK ---
         if prev_close > resistance and volume_valid and current_close > ema200_macro and current_rsi < 70:
             if pair_states[symbol]['status'] != 'BREAKOUT_BULLISH':
-                pair_states[symbol] = {'status': 'BREAKOUT_BULLISH', 'level': resistance}
+                pair_states[symbol] = {'status': 'BREAKOUT_BULLISH', 'level': resistance, 'sl': support, 'tp': 0.0}
                 bot.send_message(TELEGRAM_CHAT_ID, f"🚀 *VALID BULLISH BREAKOUT*\n\nPair: `{symbol}`\nLevel: {resistance}\nVolume: Lebih dari 1.5x Rata-rata ✅\nTren Makro: Di atas EMA 200 (Bullish) ✅\nRSI: {current_rsi:.1f} ✅\n\n_Menunggu pantulan Retest..._", parse_mode='Markdown')
 
         elif pair_states[symbol]['status'] == 'BREAKOUT_BULLISH':
             target_res = pair_states[symbol]['level']
+            # Konfirmasi entry pasca retest
             if current_low <= target_res * 1.001 and current_close > target_res:
-                bot.send_message(TELEGRAM_CHAT_ID, f"🎯 *RETEST SUCCESS (ENTRY LONG)*\n\nPair: `{symbol}`\nHarga memantul sukses di level: {target_res}\n*Rekomendasi:* Open Posisi LONG (RR 1:2). Put SL di bawah support terdekat.", parse_mode='Markdown')
-                pair_states[symbol] = {'status': 'NONE', 'level': 0.0}
+                stop_loss = pair_states[symbol]['sl']
+                risk = current_close - stop_loss
+                if risk <= 0: risk = current_close * 0.005 # Jaga-jaga jika hitungan support cacat
+                take_profit = current_close + (risk * 2) # Target rasio RR 1:2
+                
+                # Ubah status menjadi IN_LONG agar dikunci hingga menyentuh TP/SL
+                pair_states[symbol] = {'status': 'IN_LONG', 'level': target_res, 'sl': stop_loss, 'tp': take_profit}
+                
+                bot.send_message(TELEGRAM_CHAT_ID, f"🎯 *RETEST SUCCESS (ENTRY LONG)*\n\nPair: `{symbol}`\nHarga memantul sukses di level: {target_res}\n\n*Rencana Eksekusi Trade:*\n📥 Harga Entry: `{current_close:.4f}`\n🛑 Stop Loss (SL): `{stop_loss:.4f}`\n🎯 Take Profit (TP): `{take_profit:.4f}`\n⚖️ Rasio Risk-Reward: `1:2`", parse_mode='Markdown')
 
         elif prev_close < support and volume_valid and current_close < ema200_macro and current_rsi > 30:
             if pair_states[symbol]['status'] != 'BREAKOUT_BEARISH':
-                pair_states[symbol] = {'status': 'BREAKOUT_BEARISH', 'level': support}
+                pair_states[symbol] = {'status': 'BREAKOUT_BEARISH', 'level': support, 'sl': resistance, 'tp': 0.0}
                 bot.send_message(TELEGRAM_CHAT_ID, f"💥 *VALID BEARISH BREAKDOWN*\n\nPair: `{symbol}`\nLevel: {support}\nVolume: Lebih dari 1.5x Rata-rata ✅\nTren Makro: Di bawah EMA 200 (Bearish) ✅\nRSI: {current_rsi:.1f} ✅\n\n_Menunggu pantulan Retest..._", parse_mode='Markdown')
 
         elif pair_states[symbol]['status'] == 'BREAKOUT_BEARISH':
             target_sup = pair_states[symbol]['level']
+            # Konfirmasi entry pasca retest
             if current_high >= target_sup * 0.999 and current_close < target_sup:
-                bot.send_message(TELEGRAM_CHAT_ID, f"🎯 *RETEST SUCCESS (ENTRY SHORT)*\n\nPair: `{symbol}`\nHarga memantul sukses di level: {target_sup}\n*Rekomendasi:* Open Posisi SHORT (RR 1:2). Put SL di atas resistance terdekat.", parse_mode='Markdown')
-                pair_states[symbol] = {'status': 'NONE', 'level': 0.0}
+                stop_loss = pair_states[symbol]['sl']
+                risk = stop_loss - current_close
+                if risk <= 0: risk = current_close * 0.005
+                take_profit = current_close - (risk * 2) # Target rasio RR 1:2
+                
+                # Ubah status menjadi IN_SHORT agar dikunci hingga menyentuh TP/SL
+                pair_states[symbol] = {'status': 'IN_SHORT', 'level': target_sup, 'sl': stop_loss, 'tp': take_profit}
+                
+                bot.send_message(TELEGRAM_CHAT_ID, f"🎯 *RETEST SUCCESS (ENTRY SHORT)*\n\nPair: `{symbol}`\nHarga memantul sukses di level: {target_sup}\n\n*Rencana Eksekusi Trade:*\n📥 Harga Entry: `{current_close:.4f}`\n🛑 Stop Loss (SL): `{stop_loss:.4f}`\n🎯 Take Profit (TP): `{take_profit:.4f}`\n⚖️ Rasio Risk-Reward: `1:2`", parse_mode='Markdown')
 
+        # Pembatalan manual jika breakout gagal/invalid sebelum retest terjadi
         if pair_states[symbol]['status'] == 'BREAKOUT_BULLISH' and current_close < target_res * 0.995:
-            pair_states[symbol] = {'status': 'NONE', 'level': 0.0}
+            pair_states[symbol] = {'status': 'NONE', 'level': 0.0, 'sl': 0.0, 'tp': 0.0}
         elif pair_states[symbol]['status'] == 'BREAKOUT_BEARISH' and current_close > target_sup * 1.005:
-            pair_states[symbol] = {'status': 'NONE', 'level': 0.0}
+            pair_states[symbol] = {'status': 'NONE', 'level': 0.0, 'sl': 0.0, 'tp': 0.0}
 
     except Exception as e:
         print(f"Error scan {symbol}: {e}")
