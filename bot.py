@@ -129,27 +129,28 @@ def handle_backtest_command(message):
 
     coin_name = args[1].upper().strip()
     symbol = f"{coin_name}-USDT-SWAP"
-    
-    # Kirim pesan loading awal
     loading_msg = bot.reply_to(message, f"⏳ _Menghitung Winrate premium untuk {symbol}..._", parse_mode='Markdown')
 
     try:
-        # KITA UBAH LIMIT MENJADI 300 AGAR API OKX TIDAK TIMEOUT / REJECT
-        candles = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME_LIVE, limit=300)
+        # Ambil data lilin agak banyak agar aman untuk kalkulasi EMA 200
+        candles = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME_LIVE, limit=500)
         
-        if not candles or len(candles) < CANDLE_COUNT:
-            bot.reply_to(message, f"❌ Data transaksi historis untuk `{symbol}` tidak mencukupi di OKX.", parse_mode='Markdown')
+        if not candles or len(candles) < 205:
+            bot.reply_to(message, f"❌ Data transaksi historis untuk `{symbol}` tidak mencukupi (Minimal butuh 205 candle).", parse_mode='Markdown')
             return
 
         total_trades, wins, losses = 0, 0, 0
         state = 'NONE'
         trigger_level, sl_level, tp_level = 0.0, 0.0, 0.0
 
-        for i in range(CANDLE_COUNT + 2, len(candles)):
+        # PERBAIKAN UTAMA: Start loop diatur dari index 202 agar local_closes memiliki > 200 data
+        for i in range(202, len(candles)):
             current_high, current_low, current_close = candles[i][2], candles[i][3], candles[i][4]
             prev_close = candles[i-1][4]
             
             hist_candles = candles[i - CANDLE_COUNT - 2 : i - 1]
+            if not hist_candles: continue
+            
             resistance = max([c[2] for c in hist_candles])
             support = min([c[3] for c in hist_candles])
             
@@ -157,9 +158,16 @@ def handle_backtest_command(message):
             breakout_volume = candles[i-1][5]
             volume_valid = breakout_volume > (avg_volume * VOLUME_MULTIPLIER)
             
+            # Memotong subset data penutupan dari index 0 hingga i
             local_closes = [c[4] for c in candles[:i]]
+            
+            # Hitung indikator secara aman
             current_ema200_macro = calculate_ema(local_closes, period=200) 
             current_rsi = calculate_rsi(local_closes, period=14)
+
+            # Proteksi ekstra: jika indikator gagal return angka, lewati candle ini
+            if not current_ema200_macro or not current_rsi:
+                continue
 
             if state == 'NONE':
                 if prev_close > resistance and volume_valid and current_close > current_ema200_macro and current_rsi < 70:
@@ -210,7 +218,6 @@ def handle_backtest_command(message):
             f"🎯 *OPTIMIZED WIN RATE: {winrate:.2f}%* 🔥"
         )
         
-        # Hapus pesan loading dengan aman
         try:
             bot.delete_message(message.chat.id, loading_msg.message_id)
         except:
@@ -219,9 +226,11 @@ def handle_backtest_command(message):
         bot.reply_to(message, report_text, parse_mode='Markdown')
 
     except Exception as e:
-        # Jika terjadi error API, kirimkan detail error asli tanpa crash teks
-        error_string = str(e)
-        bot.reply_to(message, f"❌ *Gagal memproses backtest.*\nDetail Kendala: `{error_string}`", parse_mode='Markdown')
+        try:
+            bot.delete_message(message.chat.id, loading_msg.message_id)
+        except:
+            pass
+        bot.reply_to(message, f"❌ *Gagal memproses backtest.*\nDetail Kendala: `{str(e)}`", parse_mode='Markdown')
     
 @bot.message_handler(func=lambda msg: True)
 def handle_reply_keyboard(message):
