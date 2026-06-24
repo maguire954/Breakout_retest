@@ -129,10 +129,18 @@ def handle_backtest_command(message):
 
     coin_name = args[1].upper().strip()
     symbol = f"{coin_name}-USDT-SWAP"
+    
+    # Kirim pesan loading awal
     loading_msg = bot.reply_to(message, f"⏳ _Menghitung Winrate premium untuk {symbol}..._", parse_mode='Markdown')
 
     try:
-        candles = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME_LIVE, limit=1000)
+        # KITA UBAH LIMIT MENJADI 300 AGAR API OKX TIDAK TIMEOUT / REJECT
+        candles = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME_LIVE, limit=300)
+        
+        if not candles or len(candles) < CANDLE_COUNT:
+            bot.reply_to(message, f"❌ Data transaksi historis untuk `{symbol}` tidak mencukupi di OKX.", parse_mode='Markdown')
+            return
+
         total_trades, wins, losses = 0, 0, 0
         state = 'NONE'
         trigger_level, sl_level, tp_level = 0.0, 0.0, 0.0
@@ -201,19 +209,20 @@ def handle_backtest_command(message):
             f"🟢 Profit (Wins): *{wins}* | 🔴 Loss: *{losses}*\n\n"
             f"🎯 *OPTIMIZED WIN RATE: {winrate:.2f}%* 🔥"
         )
+        
+        # Hapus pesan loading dengan aman
         try:
             bot.delete_message(message.chat.id, loading_msg.message_id)
         except:
             pass
+            
         bot.reply_to(message, report_text, parse_mode='Markdown')
-    except Exception as e:
-        try:
-            bot.delete_message(message.chat.id, loading_msg.message_id)
-        except:
-            pass
-        # PERBAIKAN UTAMA: Menggunakan string formatting f-string yang valid, bukan operator +
-        bot.reply_to(message, f"❌ Error Backtest: `{str(e)}`", parse_mode='Markdown')
 
+    except Exception as e:
+        # Jika terjadi error API, kirimkan detail error asli tanpa crash teks
+        error_string = str(e)
+        bot.reply_to(message, f"❌ *Gagal memproses backtest.*\nDetail Kendala: `{error_string}`", parse_mode='Markdown')
+    
 @bot.message_handler(func=lambda msg: True)
 def handle_reply_keyboard(message):
     text = message.text
