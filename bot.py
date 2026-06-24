@@ -267,6 +267,7 @@ def send_active_patterns(message):
         text += f"• *{symbol.replace('-USDT-SWAP','')}*: {emoji} | Level Key: `{level}`\n"
     bot.send_message(message.chat.id, text, parse_mode='Markdown')
 
+```python
 def send_open_positions(message):
     if not open_trades:
         bot.send_message(message.chat.id, "📭 *Tidak ada posisi trading yang aktif saat ini.*", parse_mode='Markdown')
@@ -279,11 +280,10 @@ def send_open_positions(message):
     
     for symbol, data in open_trades.items():
         coin = symbol.replace('-USDT-SWAP', '')
-        tipe = data['type'] # LONG atau SHORT
+        tipe = data['type']
         entry_price = data['entry']
         
-        # Ambil harga berjalan (Current Price) secara live dari OKX
-        current_price = entry_price  # Nilai default jika API terkendala
+        current_price = entry_price
         try:
             ticker = exchange.fetch_ticker(symbol)
             if ticker and 'last' in ticker:
@@ -291,38 +291,20 @@ def send_open_positions(message):
         except Exception as e:
             print(f"Gagal mengambil ticker live untuk {symbol}: {e}")
 
-        # Hitung selisih nominal dan persentase floating profit/loss
         if tipe == 'LONG':
             pnl_nominal = current_price - entry_price
             pnl_percent = (pnl_nominal / entry_price) * 100
             tipe_emoji = "🟢 LONG"
-        else: # Tipe SHORT
+        else:
             pnl_nominal = entry_price - current_price
             pnl_percent = (pnl_nominal / entry_price) * 100
             tipe_emoji = "🔴 SHORT"
 
-        # Tentukan teks warna dan simbol status berdasarkan hasil PnL
-        # Catatan: Telegram MarkdownV2/Html tidak mendukung warna teks kustom (hex/css).
-        # Solusi standar bot pro adalah menggunakan blok kode (monospace) baki teks warna bawaan terminal.
+        # Tampilan warna hijau (+) untuk profit, merah (-) untuk loss menggunakan block diff Telegram
         if pnl_nominal >= 0:
-            # Blok teks warna hijau menggunakan format kode markdown diff (+)
             pnl_status = f"
-http://googleusercontent.com/immersive_entry_chip/0
-http://googleusercontent.com/immersive_entry_chip/1
 
----
-
-### 💡 Mengapa Menggunakan Format Kode `diff`?
-Aplikasi Telegram secara bawaan tidak mengizinkan modifikasi warna teks menggunakan kode HTML seperti `<span style="color:red">` demi alasan keamanan tampilan tema pengguna. 
-
-Untuk menyiasatinya, kita memanfaatkan fitur pembungkus kode ` ```diff ` di atas. Fitur ini memaksa Telegram menerapkan pewarnaan kode sistem:
-* Teks yang diawali tanda **`+`** otomatis berubah menjadi warna **Hijau** cerah (Profit).
-* Teks yang diawali tanda **`-`** otomatis berubah menjadi warna **Merah** cerah (Rugi).
-
-### 📥 Langkah Pengujian
-1. Perbarui fungsi tersebut di dalam repositori GitHub Anda.
-2. Tunggu proses deploy Railway Anda selesai.
-3. Ketuk tombol **📊 Posisi Open** di menu bawah Telegram Anda. Bot kini akan memberikan laporan harga langsung dari pasar OKX lengkap dengan indikator profit/loss visual yang rapi!
+```
 
 def send_trade_history(message):
     if not trade_history:
