@@ -18,21 +18,49 @@ bot = telebot.TeleBot(TELEGRAM_TOKEN)
 exchange = ccxt.okx({'options': {'defaultType': 'swap'}, 'enableRateLimit': True})
 
 pair_states = {}
+active_pairs = []
 
-# --- PROSES INISIALISASI LANGSUNG DI GLOBAL SCOPE ---
-print("Menghubungi OKX API untuk mengunci daftar koin...")
+# --- PROSES INISIALISASI OTOMATIS BERDASARKAN VOLUME TERBESAR ---
+print("Menghubungi OKX API untuk mengambil 50 koin dengan volume terbesar...")
 try:
     exchange.load_markets()
-    all_futures = [symbol for symbol in exchange.symbols if '-USDT-SWAP' in symbol]
-    if all_futures:
-        active_pairs = all_futures[:40] # Ambil 40 koin teraktif
-        print(f"Inisialisasi Sukses! Berhasil mengunci {len(active_pairs)} pair koin.")
+    
+    # 1. Saring hanya koin USDT-SWAP (Futures) yang aktif
+    futures_markets = [
+        market for market in exchange.markets.values() 
+        if market['swap'] and market['linear'] and market['settle'] == 'USDT' and market['active']
+    ]
+    
+    # 2. Urutkan koin berdasarkan volume 24 jam (vol24h) dari terbesar ke terkecil
+    # Menggunakan fungsi float() untuk memastikan volume dibaca sebagai angka matematis
+    futures_markets.sort(
+        key=lambda x: float(x['info'].get('vol24h', 0)) if 'info' in x else 0, 
+        reverse=True
+    )
+    
+    # 3. Ambil 50 koin teratas dari hasil urutan volume terbanyak
+    active_pairs = [market['symbol'] for market in futures_markets[:50]]
+    
+    if active_pairs:
+        print(f"🔥 Sukses mengunci {len(active_pairs)} koin dengan VOLUME TERBESAR di OKX!")
     else:
-        raise ValueError("Daftar symbols OKX kosong.")
+        raise ValueError("Gagal menyaring data koin.")
+
 except Exception as e:
-    print(f"Gagal memuat pasar OKX di awal: {e}. Menggunakan list fallback manual...")
-    # Jika API OKX sempat timeout saat booting, gunakan list cadangan ini agar bot tidak kosong
-    active_pairs = ['BTC-USDT-SWAP', 'ETH-USDT-SWAP', 'SOL-USDT-SWAP', 'XRP-USDT-SWAP', 'ADA-USDT-SWAP']
+    print(f"Gagal mengambil urutan volume dari OKX: {e}. Menggunakan list fallback 50 koin terpopuler...")
+    # List cadangan tetap disiapkan sebagai pengaman jika API OKX sempat timeout saat booting
+    active_pairs = [
+        'BTC-USDT-SWAP', 'ETH-USDT-SWAP', 'SOL-USDT-SWAP', 'XRP-USDT-SWAP', 'ADA-USDT-SWAP',
+        'AVAX-USDT-SWAP', 'DOT-USDT-SWAP', 'DOGE-USDT-SWAP', 'SHIB-USDT-SWAP', 'LINK-USDT-SWAP',
+        'NEAR-USDT-SWAP', 'MATIC-USDT-SWAP', 'LTC-USDT-SWAP', 'TRX-USDT-SWAP', 'UNI-USDT-SWAP',
+        'APT-USDT-SWAP', 'OP-USDT-SWAP', 'ARB-USDT-SWAP', 'FIL-USDT-SWAP', 'ATOM-USDT-SWAP',
+        'FTM-USDT-SWAP', 'INJ-USDT-SWAP', 'SUI-USDT-SWAP', 'RNDR-USDT-SWAP', 'GRT-USDT-SWAP',
+        'ICP-USDT-SWAP', 'STX-USDT-SWAP', 'IMX-USDT-SWAP', 'GALA-USDT-SWAP', 'THETA-USDT-SWAP',
+        'WIF-USDT-SWAP', 'PEPE-USDT-SWAP', 'BONK-USDT-SWAP', 'FLOKI-USDT-SWAP', 'TIA-USDT-SWAP',
+        'SEI-USDT-SWAP', 'ORDI-USDT-SWAP', '1INCH-USDT-SWAP', 'AAVE-USDT-SWAP', 'ALGO-USDT-SWAP',
+        'ANKR-USDT-SWAP', 'APE-USDT-SWAP', 'AXS-USDT-SWAP', 'BLUR-USDT-SWAP', 'COMP-USDT-SWAP',
+        'CRV-USDT-SWAP', 'ENS-USDT-SWAP', 'EOS-USDT-SWAP', 'FLOW-USDT-SWAP', 'SAND-USDT-SWAP'
+    ]
 
 # --- SECTION 1: MATHEMATICAL UTILITIES ---
 
