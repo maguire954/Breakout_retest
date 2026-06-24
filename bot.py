@@ -42,7 +42,6 @@ try:
         print(f"🔥 Sukses mengunci {len(active_pairs)} koin dengan VOLUME TERBESAR di OKX!")
 except Exception as e:
     print(f"Gagal memuat pasar OKX: {e}. Menggunakan list fallback 50 koin...")
-    # KITA AMANKAN DAFTAR CADANGAN DI SINI MENJADI 50 KOIN UTUH
     active_pairs = [
         'BTC-USDT-SWAP', 'ETH-USDT-SWAP', 'SOL-USDT-SWAP', 'XRP-USDT-SWAP', 'ADA-USDT-SWAP',
         'AVAX-USDT-SWAP', 'DOT-USDT-SWAP', 'DOGE-USDT-SWAP', 'SHIB-USDT-SWAP', 'LINK-USDT-SWAP',
@@ -89,7 +88,6 @@ def run_telegram_bot():
 # =======================================================
 
 def main_menu_keyboard():
-    """Membuat Reply Keyboard Utama di bagian bawah layar"""
     markup = ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
     markup.add(
         KeyboardButton("🔍 Pantauan Koin"),
@@ -101,7 +99,6 @@ def main_menu_keyboard():
     return markup
 
 def pairs_category_keyboard():
-    """Membuat Inline Keyboard untuk sub-menu daftar koin berdasarkan kategori"""
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(
         InlineKeyboardButton("🔥 Top 50 Vol Teraktif", callback_data="cat_top50"),
@@ -123,8 +120,6 @@ def send_welcome(message):
     )
     bot.send_message(message.chat.id, welcome_text, parse_mode='Markdown', reply_markup=main_menu_keyboard())
 
-
-# --- PINDAHKAN LOGIKA BACKTEST KE SINI (DI ATAS HANDLER UTAMA) ---
 @bot.message_handler(commands=['backtest'])
 def handle_backtest_command(message):
     args = message.text.split()
@@ -206,16 +201,21 @@ def handle_backtest_command(message):
             f"🟢 Profit (Wins): *{wins}* | 🔴 Loss: *{losses}*\n\n"
             f"🎯 *OPTIMIZED WIN RATE: {winrate:.2f}%* 🔥"
         )
-        bot.delete_message(message.chat.id, loading_msg.message_id)
+        try:
+            bot.delete_message(message.chat.id, loading_msg.message_id)
+        except:
+            pass
         bot.reply_to(message, report_text, parse_mode='Markdown')
     except Exception as e:
-        bot.delete_message(message.chat.id, loading_msg.message_id)
+        try:
+            bot.delete_message(message.chat.id, loading_msg.message_id)
+        except:
+            pass
+        # PERBAIKAN UTAMA: Menggunakan string formatting f-string yang valid, bukan operator +
         bot.reply_to(message, f"❌ Error Backtest: `{str(e)}`", parse_mode='Markdown')
 
-# --- KINI INTERCEPTOR UTAMA DILETAK KAN DI PALING BAWAH SEBAGAI JALUR AKHIR ---
 @bot.message_handler(func=lambda msg: True)
 def handle_reply_keyboard(message):
-    """Menangkap ketukan teks dari Reply Keyboard"""
     text = message.text
     
     if text == "🔍 Pantauan Koin":
@@ -233,7 +233,6 @@ def handle_reply_keyboard(message):
         send_trade_history(message)
     elif text == "🤖 Status Sistem":
         bot.reply_to(message, f"✅ *Bot Status:* Online.\n🎯 *Engine:* Memantau {len(active_pairs)} koin dengan volume tertinggi secara live.", parse_mode='Markdown')
-
 
 # --- REFACTORING UTILITY FUNCTIONS FOR COMMANDS ---
 
@@ -281,7 +280,6 @@ def send_trade_history(message):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('cat_'))
 def handle_category_selection(call):
-    """Memproses klik dari sub-menu kategori koin Inline Keyboard"""
     category = call.data
     
     if category == "cat_top50":
@@ -294,17 +292,16 @@ def handle_category_selection(call):
     elif category == "cat_memes":
         text = "🚀 *Koin Kategori Meme & Alts Populer:*\n\n`DOGE, SHIB, PEPE, WIF, BONK, FLOKI, GALA, OP, ARB`"
         
-    # Amandemen teks pesan agar berubah secara interaktif
     bot.edit_message_text(
         chat_id=call.message.chat.id,
         message_id=call.message.message_id,
         text=text,
         parse_mode='Markdown',
-        reply_markup=pairs_category_keyboard() # Biar menunya tetap menempel di bawah untuk mempermudah ganti kategori
+        reply_markup=pairs_category_keyboard()
     )
-    bot.answer_callback_query(call.id) # Menghilangkan status loading di telegram user
+    bot.answer_callback_query(call.id)
 
-# --- SECTION 4: LIVE MARKET SCANNER & MAIN ---
+# --- LIVE MARKET SCANNER & MAIN ---
 
 def scan_breakout_retest(symbol):
     global open_trades, trade_history, pair_states
@@ -391,7 +388,7 @@ def scan_breakout_retest(symbol):
         elif prev_close < support and volume_valid and current_close < ema200_macro and current_rsi > 30:
             if pair_states[symbol]['status'] != 'BREAKOUT_BEARISH':
                 pair_states[symbol] = {'status': 'BREAKOUT_BEARISH', 'level': support, 'sl': resistance, 'tp': 0.0}
-                bot.send_message(TELEGRAM_CHAT_ID, f"💥 *VALID BEARISH BREAKDOWN*\n\nPair: `{symbol}`\nLevel: {support}\n_Menunggu pantulan Retest..._", parse_mode='Markdown')
+                bot.send_message(TELEGRAM_CHAT_ID, f"💥 *VALID BEARISH BREAKDOWN*\n\nPair: `{support}`\nLevel: {support}\n_Menunggu pantulan Retest..._", parse_mode='Markdown')
 
         elif pair_states[symbol]['status'] == 'BREAKOUT_BEARISH':
             target_sup = pair_states[symbol]['level']
@@ -419,7 +416,7 @@ def main():
     tele_thread.daemon = True
     tele_thread.start()
 
-    bot.send_message(TELEGRAM_CHAT_ID, f"🤖 *Bot OKX Engine Pro Aktif!* 🎉\n\nKeyboard navigasi menu utama & sub-kategori koin siap digunakan.", parse_mode='Markdown', reply_markup=main_menu_keyboard())
+    bot.send_message(TELEGRAM_CHAT_ID, f"🤖 *Bot OKX Engine Pro Aktif!* 🎉\n\nSemua modul backtest dan navigasi diperbarui.", parse_mode='Markdown', reply_markup=main_menu_keyboard())
 
     while True:
         for symbol in active_pairs:
