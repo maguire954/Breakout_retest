@@ -267,7 +267,6 @@ def send_active_patterns(message):
         text += f"• *{symbol.replace('-USDT-SWAP','')}*: {emoji} | Level Key: `{level}`\n"
     bot.send_message(message.chat.id, text, parse_mode='Markdown')
 
-```python
 def send_open_positions(message):
     if not open_trades:
         bot.send_message(message.chat.id, "📭 *Tidak ada posisi trading yang aktif saat ini.*", parse_mode='Markdown')
@@ -303,8 +302,6 @@ def send_open_positions(message):
         # Tampilan warna hijau (+) untuk profit, merah (-) untuk loss menggunakan block diff Telegram
         if pnl_nominal >= 0:
             pnl_status = f"
-
-```
 
 def send_trade_history(message):
     if not trade_history:
