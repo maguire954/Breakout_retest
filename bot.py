@@ -17,9 +17,22 @@ VOLUME_MULTIPLIER = 1.5
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 exchange = ccxt.okx({'options': {'defaultType': 'swap'}, 'enableRateLimit': True})
 
-# Inisialisasi variabel global dengan list kosong
 pair_states = {}
-active_pairs = []
+
+# --- PROSES INISIALISASI LANGSUNG DI GLOBAL SCOPE ---
+print("Menghubungi OKX API untuk mengunci daftar koin...")
+try:
+    exchange.load_markets()
+    all_futures = [symbol for symbol in exchange.symbols if '-USDT-SWAP' in symbol]
+    if all_futures:
+        active_pairs = all_futures[:15] # Ambil 15 koin teraktif
+        print(f"Inisialisasi Sukses! Berhasil mengunci {len(active_pairs)} pair koin.")
+    else:
+        raise ValueError("Daftar symbols OKX kosong.")
+except Exception as e:
+    print(f"Gagal memuat pasar OKX di awal: {e}. Menggunakan list fallback manual...")
+    # Jika API OKX sempat timeout saat booting, gunakan list cadangan ini agar bot tidak kosong
+    active_pairs = ['BTC-USDT-SWAP', 'ETH-USDT-SWAP', 'SOL-USDT-SWAP', 'XRP-USDT-SWAP', 'ADA-USDT-SWAP']
 
 # --- SECTION 1: MATHEMATICAL UTILITIES ---
 
@@ -82,9 +95,9 @@ def send_status(message):
 
 @bot.message_handler(commands=['pairs'])
 def send_pairs(message):
-    global active_pairs # Wajib deklarasi global di sini
+    # Mengambil langsung dari scope global yang sudah pasti terisi sejak file di-load
     if not active_pairs:
-        bot.reply_to(message, "❌ Daftar pair belum dimuat atau kosong di server.")
+        bot.reply_to(message, "❌ Daftar pair kosong di server.")
         return
     pairs_list = ", ".join([p.replace('-USDT-SWAP', '') for p in active_pairs])
     bot.reply_to(message, f"🔍 *Pair di-scan ({len(active_pairs)}):*\n`{pairs_list}`", parse_mode='Markdown')
@@ -259,28 +272,14 @@ def scan_breakout_retest(symbol):
 
 def main():
     print("Memulai aplikasi...")
-    global active_pairs
     
-    # Ambil data koin sinkronus di awal SEBELUM menyalakan Telegram & Loop Utama
-    try:
-        print("Menghubungi OKX API...")
-        exchange.load_markets()
-        all_futures = [symbol for symbol in exchange.symbols if '-USDT-SWAP' in symbol]
-        if all_futures:
-            active_pairs = all_futures[:15]
-            print(f"Berhasil mengunci {len(active_pairs)} pair koin.")
-    except Exception as e:
-        print(f"Gagal inisialisasi pasar OKX di awal: {e}")
-        # Fallback jika API down saat booting, pasang beberapa pair dasar secara manual
-        active_pairs = ['BTC-USDT-SWAP', 'ETH-USDT-SWAP', 'SOL-USDT-SWAP']
-
-    # Nyalakan Telegram listener setelah list koin dipastikan terisi
+    # Nyalakan Telegram listener di thread terpisah
     tele_thread = threading.Thread(target=run_telegram_bot)
     tele_thread.daemon = True
     tele_thread.start()
 
-    # Kirim pesan peluncuran hanya SATU KALI
-    bot.send_message(TELEGRAM_CHAT_ID, "🤖 *Bot OKX High-Winrate Engine Aktif!* 🎉\n\nSemua data koin berhasil dikunci. Memulai pemantauan market...", parse_mode='Markdown')
+    # Kirim satu kali pesan inisialisasi sukses ke Telegram
+    bot.send_message(TELEGRAM_CHAT_ID, f"🤖 *Bot OKX High-Winrate Engine Aktif!* 🎉\n\nMemantau {len(active_pairs)} koin di OKX Futures secara real-time.", parse_mode='Markdown')
 
     # Loop Scanning Market Utama
     while True:
