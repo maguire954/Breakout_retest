@@ -257,26 +257,35 @@ def scan_breakout_retest(symbol):
 
 def main():
     print("Memulai aplikasi...")
-    try:
-        exchange.load_markets()
-        all_futures = [symbol for symbol in exchange.symbols if '-USDT-SWAP' in symbol]
-        global active_pairs
-        active_pairs = all_futures[:15] 
-    except Exception as e:
-        print(f"Gagal memuat pasar OKX: {e}")
-
-    # run_telegram_bot didefinisikan di atas, jadi pemanggilan thread ini aman
+    
+    # Jalankan Telegram thread di awal agar bot langsung responsif
     tele_thread = threading.Thread(target=run_telegram_bot)
     tele_thread.daemon = True
     tele_thread.start()
 
-    bot.send_message(TELEGRAM_CHAT_ID, "🤖 *Bot OKX High-Winrate Engine Aktif!* ⚡", parse_mode='Markdown')
+    bot.send_message(TELEGRAM_CHAT_ID, "🤖 *Bot OKX High-Winrate Engine Aktif!* ⚡\n_Sedang memuat data koin dari OKX..._", parse_mode='Markdown')
 
+    # Gunakan perulangan sampai data koin benar-benar berhasil diambil dari OKX
+    global active_pairs
+    while not active_pairs:
+        try:
+            print("Mencoba mengambil daftar pair dari OKX...")
+            exchange.load_markets()
+            all_futures = [symbol for symbol in exchange.symbols if '-USDT-SWAP' in symbol]
+            active_pairs = all_futures[:15] # Ambil 15 koin teraktif
+            print(f"Berhasil memuat {len(active_pairs)} pair.")
+            bot.send_message(TELEGRAM_CHAT_ID, "✅ *Daftar koin berhasil dimuat!* Bot siap memantau pasar.", parse_mode='Markdown')
+        except Exception as e:
+            print(f"Gagal memuat pasar OKX, mencoba lagi dalam 5 detik... Error: {e}")
+            time.sleep(5)
+
+    # Memulai loop scanning market utama
     while True:
         for symbol in active_pairs:
             scan_breakout_retest(symbol)
             time.sleep(2)
         time.sleep(60)
+
 
 if __name__ == "__main__":
     main()
