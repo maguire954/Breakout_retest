@@ -20,7 +20,7 @@ exchange = ccxt.okx({'options': {'defaultType': 'swap'}, 'enableRateLimit': True
 pair_states = {}
 active_pairs = []
 
-# --- WADAH BARU UNTUK MONITORING POSISI & HISTORY ---
+# --- WADAH MONITORING POSISI & HISTORY ---
 open_trades = {}    # Menyimpan trade yang sedang berjalan
 trade_history = []  # Menyimpan riwayat trade yang sudah closed (TP/SL)
 
@@ -36,7 +36,6 @@ try:
     ]
     
     # 2. Urutkan koin berdasarkan volume 24 jam (vol24h) dari terbesar ke terkecil
-    # Menggunakan fungsi float() untuk memastikan volume dibaca sebagai angka matematis
     futures_markets.sort(
         key=lambda x: float(x['info'].get('vol24h', 0)) if 'info' in x else 0, 
         reverse=True
@@ -52,7 +51,6 @@ try:
 
 except Exception as e:
     print(f"Gagal mengambil urutan volume dari OKX: {e}. Menggunakan list fallback 50 koin terpopuler...")
-    # List cadangan tetap disiapkan sebagai pengaman jika API OKX sempat timeout saat booting
     active_pairs = [
         'BTC-USDT-SWAP', 'ETH-USDT-SWAP', 'SOL-USDT-SWAP', 'XRP-USDT-SWAP', 'ADA-USDT-SWAP',
         'AVAX-USDT-SWAP', 'DOT-USDT-SWAP', 'DOGE-USDT-SWAP', 'SHIB-USDT-SWAP', 'LINK-USDT-SWAP',
@@ -107,56 +105,50 @@ def run_telegram_bot():
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     welcome_text = (
-        "👋 *Selamat datang di Bot OKX Futures (High Winrate Edition)!*\n\n"
-        "Bot ini telah dioptimasi dengan filter:\n"
-        "1. 📈 *S&R 50 Candle*\n"
-        "2. 📊 *Lonjakan Volume (1.5x Rata-rata)*\n"
-        "3. 🌍 *Filter Tren Makro EMA 200 (TF 1 Jam)*\n"
-        "4. 🎛️ *Filter Momentum RSI (14)*\n\n"
-        "*Command:*\n"
+        "👋 *Selamat datang di Bot OKX Futures (High Winrate Edition)?*\n\n"
+        "Bot ini telah dioptimasi dengan filter ketat.\n\n"
+        "*Command Utama:*\n"
         "🔗 /status - Cek kondisi bot\n"
-        "📊 /pairs - Daftar koin dipantau\n"
+        "📊 /pairs - Daftar 50 koin volume tertinggi\n"
         "🎯 /pola - Lihat koin setup aktif\n"
-        "🧪 `/backtest <KOIN>` - Cek winrate baru (Contoh: `/backtest BTC`)"
-        "📊 /open - Lihat posisi trading aktif\n"
-        "📜 /history - Riwayat koin yang sudah TP/SL\n"
+        "💼 /open - Posisi trading berjalan (floating)\n"
+        "📜 /history - Histori koin yang hit TP/SL\n"
+        "🧪 `/backtest <KOIN>` - Jalankan uji winrate"
     )
     bot.reply_to(message, welcome_text, parse_mode='Markdown')
 
 @bot.message_handler(commands=['status'])
 def send_status(message):
-    bot.reply_to(message, "✅ *Bot Status:* Online dengan filter indikator ketat.", parse_mode='Markdown')
+    bot.reply_to(message, "✅ *Bot Status:* Online dengan pemantauan 50 koin volume teraktif.", parse_mode='Markdown')
 
 @bot.message_handler(commands=['pairs'])
 def send_pairs(message):
-    # Mengambil langsung dari scope global yang sudah pasti terisi sejak file di-load
     if not active_pairs:
         bot.reply_to(message, "❌ Daftar pair kosong di server.")
         return
     pairs_list = ", ".join([p.replace('-USDT-SWAP', '') for p in active_pairs])
-    bot.reply_to(message, f"🔍 *Pair di-scan ({len(active_pairs)}):*\n`{pairs_list}`", parse_mode='Markdown')
+    bot.reply_to(message, f"🔍 *Pair Terpantau (Volume Teratas) ({len(active_pairs)}):*\n`{pairs_list}`", parse_mode='Markdown')
 
 @bot.message_handler(commands=['pola'])
 def send_active_patterns(message):
-    waiting_retest = [symbol for symbol, data in pair_states.items() if data['status'] != 'NONE']
+    waiting_retest = [symbol for symbol, data in pair_states.items() if data['status'] in ['BREAKOUT_BULLISH', 'BREAKOUT_BEARISH']]
     if not waiting_retest:
-        bot.reply_to(message, "⏳ Bersih. Belum ada koin yang lolos filter ketat.", parse_mode='Markdown')
+        bot.reply_to(message, "⏳ Bersih. Belum ada koin baru yang menunggu retest.", parse_mode='Markdown')
         return
-    text = "🎯 *Setup Lolos Filter (Menunggu Retest):*\n\n"
+    text = "🎯 *Setup Menunggu Retest:*\n\n"
     for symbol in waiting_retest:
         status = pair_states[symbol]['status']
         level = pair_states[symbol]['level']
         emoji = "🚀 Bullish (LONG)" if "BULLISH" in status else "💥 Bearish (SHORT)"
-        text += f"• *{symbol.replace('-USDT-SWAP','')}*: {emoji} | Level: `{level}`\n"
+        text += f"• *{symbol.replace('-USDT-SWAP','')}*: {emoji} | Level Key: `{level}`\n"
     bot.reply_to(message, text, parse_mode='Markdown')
 
 @bot.message_handler(commands=['open'])
 def send_open_positions(message):
     if not open_trades:
-        bot.reply_to(message, "📭 *Tidak ada posisi yang sedang open saat ini.*", parse_mode='Markdown')
+        bot.reply_to(message, "📭 *Tidak ada posisi trading yang aktif saat ini.*", parse_mode='Markdown')
         return
-    
-    text = "📊 *DAFTAR POSISI YANG SEDANG OPEN:* \n"
+    text = "📊 *DAFTAR POSISI YANG SEDANG OPEN:*\n"
     text += "━━━━━━━━━━━━━━━━━━━━━\n"
     for symbol, data in open_trades.items():
         coin = symbol.replace('-USDT-SWAP', '')
@@ -165,31 +157,27 @@ def send_open_positions(message):
             f"• *{coin}* ({tipe})\n"
             f"  📥 Entry: `{data['entry']:.4f}`\n"
             f"  🛑 SL: `{data['sl']:.4f}` | 🎯 TP: `{data['tp']:.4f}`\n"
-            f"  ⏰ Waktu: _{data['time']}_\n"
+            f"  ⏰ Jam Entry: _{data['time']}_\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n"
         )
     bot.reply_to(message, text, parse_mode='Markdown')
 
-
 @bot.message_handler(commands=['history'])
 def send_trade_history(message):
     if not trade_history:
-        bot.reply_to(message, "📜 *Riwayat transaksi masih kosong.*", parse_mode='Markdown')
+        bot.reply_to(message, "📜 *Belum ada histori transaksi yang terselesaikan.*", parse_mode='Markdown')
         return
-    
-    # Batasi hanya menampilkan 10 riwayat transaksi terakhir agar tidak kepanjangan
     recent_history = trade_history[-10:]
-    
     text = f"📜 *RIWAYAT TRANSAKSI TERAKHIR ({len(recent_history)}):*\n"
     text += "━━━━━━━━━━━━━━━━━━━━━\n"
-    for data in reversed(recent_history): # Menampilkan dari yang paling baru selesai
+    for data in reversed(recent_history):
         coin = data['symbol'].replace('-USDT-SWAP', '')
         hasil = "✅ TAKE PROFIT" if data['result'] == 'TP' else "❌ STOP LOSS"
         text += (
             f"• *{coin}* | {hasil}\n"
             f"  ↕️ Tipe: `{data['type']}`\n"
             f"  📥 Entry: `{data['entry']:.4f}` | 🚪 Exit: `{data['exit']:.4f}`\n"
-            f"  ⏱️ Selesai: _{data['closed_at']}_\n"
+            f"  ⏱️ Waktu Selesai: _{data['closed_at']}_\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n"
         )
     bot.reply_to(message, text, parse_mode='Markdown')
@@ -203,7 +191,7 @@ def handle_backtest_command(message):
 
     coin_name = args[1].upper().strip()
     symbol = f"{coin_name}-USDT-SWAP"
-    loading_msg = bot.reply_to(message, f"⏳ _Menghitung Winrate PREMIUM untuk {symbol} (1000 Candle)..._", parse_mode='Markdown')
+    loading_msg = bot.reply_to(message, f"⏳ _Menghitung Winrate premium untuk {symbol}..._", parse_mode='Markdown')
 
     try:
         candles = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME_LIVE, limit=1000)
@@ -271,106 +259,20 @@ def handle_backtest_command(message):
             f"📊 *LAPORAN WINRATE (PREMIUM FILTER)*\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n"
             f"Aset: `{symbol}` | TF: `{TIMEFRAME_LIVE}`\n"
-            f"S&R Jendela: `{CANDLE_COUNT} Candle`\n"
-            f"Rasio RR Target: `1:2`\n"
-            f"━━━━━━━━━━━━━━━━━━━━━\n"
             f"🔹 Total Sinyal Valid: *{total_trades}*\n"
-            f"🟢 Profit (Wins): *{wins}*\n"
-            f"🔴 Loss (Losses): *{losses}*\n\n"
-            f"🎯 *OPTIMIZED WIN RATE: {winrate:.2f}%* 🔥\n"
-            f"━━━━━━━━━━━━━━━━━━━━━\n"
-            f"_Sinyal palsu (fakeout) berhasil dikurangi secara drastis melalui filter volume & tren makro._"
+            f"🟢 Profit (Wins): *{wins}* | 🔴 Loss: *{losses}*\n\n"
+            f"🎯 *OPTIMIZED WIN RATE: {winrate:.2f}%* 🔥"
         )
         bot.delete_message(message.chat.id, loading_msg.message_id)
         bot.reply_to(message, report_text, parse_mode='Markdown')
     except Exception as e:
         bot.delete_message(message.chat.id, loading_msg.message_id)
-        bot.reply_to(message, f"❌ Error: `{str(e)}`", parse_mode='Markdown')
+        bot.reply_to(message, f"❌ Error Backtest: `{str(e)}`", parse_mode='Markdown')
 
 # --- SECTION 4: LIVE MARKET SCANNER ---
 
 def scan_breakout_retest(symbol):
-    try:
-        # 1. Ambil data candle live
-        candles = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME_LIVE, limit=CANDLE_COUNT + 5)
-        if len(candles) < CANDLE_COUNT: return
-
-        current_candle, prev_candle = candles[-1], candles[-2]
-        current_close = current_candle[4]
-        current_low = current_candle[3]
-        current_high = current_candle[2]
-        prev_close = prev_candle[4]
-
-        # Inisialisasi state jika koin baru masuk radar
-        if symbol not in pair_states:
-            pair_states[symbol] = {'status': 'NONE', 'level': 0.0, 'sl': 0.0, 'tp': 0.0}
-
-        # ======================================================================
-        # PANTALAN 1: JIKA SEDANG DALAM POSITION (MENUNGGU TP / SL)
-        # ======================================================================
-        if pair_states[symbol]['status'] == 'IN_LONG':
-            sl_level = pair_states[symbol]['sl']
-            tp_level = pair_states[symbol]['tp']
-            
-            if current_low <= sl_level:
-                bot.send_message(TELEGRAM_CHAT_ID, f"🔴 *TRADE CLOSED (STOP LOSS)*\n\nPair: `{symbol}`\nHarga menyentuh SL di level: `{sl_level}`. Tetap disiplin dengan risikonya.", parse_mode='Markdown')
-                pair_states[symbol] = {'status': 'NONE', 'level': 0.0, 'sl': 0.0, 'tp': 0.0}
-                return
-            elif current_high >= tp_level:
-                bot.send_message(TELEGRAM_CHAT_ID, f"🟢 *TRADE CLOSED (TAKE PROFIT) 🔥*\n\nPair: `{symbol}`\nHarga sukses meroket menyentuh TP di level: `{tp_level}` (RR 1:2)!", parse_mode='Markdown')
-                pair_states[symbol] = {'status': 'NONE', 'level': 0.0, 'sl': 0.0, 'tp': 0.0}
-                return
-            else:
-                return # Skip proses pencarian breakout karena posisi masih floating berjalan
-
-        if pair_states[symbol]['status'] == 'IN_SHORT':
-            sl_level = pair_states[symbol]['sl']
-            tp_level = pair_states[symbol]['tp']
-            
-            if current_high >= sl_level:
-                bot.send_message(TELEGRAM_CHAT_ID, f"🔴 *TRADE CLOSED (STOP LOSS)*\n\nPair: `{symbol}`\nHarga menyentuh SL di level: `{sl_level}`. Evaluasi kembali setupnya.", parse_mode='Markdown')
-                pair_states[symbol] = {'status': 'NONE', 'level': 0.0, 'sl': 0.0, 'tp': 0.0}
-                return
-            elif current_low <= tp_level:
-                bot.send_message(TELEGRAM_CHAT_ID, f"🟢 *TRADE CLOSED (TAKE PROFIT) 🔥*\n\nPair: `{symbol}`\nHarga sukses longsor menyentuh TP di level: `{tp_level}` (RR 1:2)!", parse_mode='Markdown')
-                pair_states[symbol] = {'status': 'NONE', 'level': 0.0, 'sl': 0.0, 'tp': 0.0}
-                return
-            else:
-                return # Skip proses pencarian breakout karena posisi masih floating berjalan
-
-
-        # ======================================================================
-        # PANTALAN 2: JIKA STATUS 'NONE' ATAU 'BREAKOUT' (PROSES SCANNING SEPERTI BIASA)
-        # ======================================================================
-        macro_candles = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME_MACRO, limit=205)
-        macro_closes = [c[4] for c in macro_candles]
-        ema200_macro = calculate_ema(macro_closes, period=200)
-
-        historical_candles = candles[-52:-2]
-        resistance = max([c[2] for c in historical_candles])
-        support = min([c[3] for c in historical_candles])
-
-        avg_volume = sum([c[5] for c in historical_candles]) / len(historical_candles)
-        breakout_volume = prev_candle[5]
-        volume_valid = breakout_volume > (avg_volume * VOLUME_MULTIPLIER)
-
-        live_closes = [c[4] for c in candles]
-        current_rsi = calculate_rsi(live_closes, period=14)
-
-        # --- DETEKSI BREAKOUT INDUK ---
-        if prev_close > resistance and volume_valid and current_close > ema200_macro and current_rsi < 70:
-            if pair_states[symbol]['status'] != 'BREAKOUT_BULLISH':
-                pair_states[symbol] = {'status': 'BREAKOUT_BULLISH', 'level': resistance, 'sl': support, 'tp': 0.0}
-                bot.send_message(TELEGRAM_CHAT_ID, f"🚀 *VALID BULLISH BREAKOUT*\n\nPair: `{symbol}`\nLevel: {resistance}\nVolume: Lebih dari 1.5x Rata-rata ✅\nTren Makro: Di atas EMA 200 (Bullish) ✅\nRSI: {current_rsi:.1f} ✅\n\n_Menunggu pantulan Retest..._", parse_mode='Markdown')
-
-        elif pair_states[symbol]['status'] == 'BREAKOUT_BULLISH':
-            target_res = pair_states[symbol]['level']
-            # Konfirmasi entry pasca retest
-            if current_low <= target_res * 1.001 and current_close > target_res:
-                stop_loss = pair_states[symbol]['sl']
-                
-def scan_breakout_retest(symbol):
-    global open_trades, trade_history
+    global open_trades, trade_history, pair_states
     try:
         candles = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME_LIVE, limit=CANDLE_COUNT + 5)
         if len(candles) < CANDLE_COUNT: return
@@ -386,79 +288,68 @@ def scan_breakout_retest(symbol):
 
         waktu_sekarang = time.strftime("%H:%M:%S")
 
-        # ======================================================================
-        # PROSES MONITORING TP / SL UNTUK POSISI YANG SEDANG OPEN
-        # ======================================================================
+        # ==================== VERIFIKASI SEWAKTU IN-TRADE LONG ====================
         if pair_states[symbol]['status'] == 'IN_LONG':
             sl_level = pair_states[symbol]['sl']
             tp_level = pair_states[symbol]['tp']
             
             if current_low <= sl_level:
                 bot.send_message(TELEGRAM_CHAT_ID, f"🔴 *TRADE CLOSED (STOP LOSS)*\n\nPair: `{symbol}`\nHarga menyentuh SL di level: `{sl_level}`.", parse_mode='Markdown')
-                # Catat ke history sebelum dihapus
                 if symbol in open_trades:
                     open_trades[symbol]['result'] = 'SL'
                     open_trades[symbol]['exit'] = sl_level
                     open_trades[symbol]['closed_at'] = waktu_sekarang
                     trade_history.append(open_trades[symbol])
-                    del open_trades[symbol] # Hapus dari daftar open
-                
+                    del open_trades[symbol]
                 pair_states[symbol] = {'status': 'NONE', 'level': 0.0, 'sl': 0.0, 'tp': 0.0}
                 return
             elif current_high >= tp_level:
                 bot.send_message(TELEGRAM_CHAT_ID, f"🟢 *TRADE CLOSED (TAKE PROFIT) 🔥*\n\nPair: `{symbol}`\nHarga menyentuh TP di level: `{tp_level}`!", parse_mode='Markdown')
-                # Catat ke history sebelum dihapus
                 if symbol in open_trades:
                     open_trades[symbol]['result'] = 'TP'
                     open_trades[symbol]['exit'] = tp_level
                     open_trades[symbol]['closed_at'] = waktu_sekarang
                     trade_history.append(open_trades[symbol])
-                    del open_trades[symbol] # Hapus dari daftar open
-                
+                    del open_trades[symbol]
                 pair_states[symbol] = {'status': 'NONE', 'level': 0.0, 'sl': 0.0, 'tp': 0.0}
                 return
             else:
                 return 
 
+        # ==================== VERIFIKASI SEWAKTU IN-TRADE SHORT ====================
         if pair_states[symbol]['status'] == 'IN_SHORT':
             sl_level = pair_states[symbol]['sl']
             tp_level = pair_states[symbol]['tp']
             
             if current_high >= sl_level:
                 bot.send_message(TELEGRAM_CHAT_ID, f"🔴 *TRADE CLOSED (STOP LOSS)*\n\nPair: `{symbol}`\nHarga menyentuh SL di level: `{sl_level}`.", parse_mode='Markdown')
-                # Catat ke history sebelum dihapus
                 if symbol in open_trades:
                     open_trades[symbol]['result'] = 'SL'
                     open_trades[symbol]['exit'] = sl_level
                     open_trades[symbol]['closed_at'] = waktu_sekarang
                     trade_history.append(open_trades[symbol])
                     del open_trades[symbol]
-                
                 pair_states[symbol] = {'status': 'NONE', 'level': 0.0, 'sl': 0.0, 'tp': 0.0}
                 return
             elif current_low <= tp_level:
                 bot.send_message(TELEGRAM_CHAT_ID, f"🟢 *TRADE CLOSED (TAKE PROFIT) 🔥*\n\nPair: `{symbol}`\nHarga menyentuh TP di level: `{tp_level}`!", parse_mode='Markdown')
-                # Catat ke history sebelum dihapus
                 if symbol in open_trades:
                     open_trades[symbol]['result'] = 'TP'
                     open_trades[symbol]['exit'] = tp_level
                     open_trades[symbol]['closed_at'] = waktu_sekarang
                     trade_history.append(open_trades[symbol])
                     del open_trades[symbol]
-                
                 pair_states[symbol] = {'status': 'NONE', 'level': 0.0, 'sl': 0.0, 'tp': 0.0}
                 return
             else:
                 return 
 
-        # ======================================================================
-        # PROSES DETEKSI SETUP UTAMA (PENCARIAN BREAKOUT)
-        # ======================================================================
+        # ==================== LOGIKA PEMBACAAN DAN PANDUAN BREAKOUT ====================
         macro_candles = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME_MACRO, limit=205)
         macro_closes = [c[4] for c in macro_candles]
         ema200_macro = calculate_ema(macro_closes, period=200)
 
-        historical_candles = candles[-(CANDLE_COUNT + 2):-2]
+        historical_candles = candles[-52:-2]
         resistance = max([c[2] for c in historical_candles])
         support = min([c[3] for c in historical_candles])
 
@@ -483,13 +374,10 @@ def scan_breakout_retest(symbol):
                 take_profit = current_close + (risk * 2)
                 
                 pair_states[symbol] = {'status': 'IN_LONG', 'level': target_res, 'sl': stop_loss, 'tp': take_profit}
-                
-                # MASUKKAN KE DAFTAR POSISI OPEN
                 open_trades[symbol] = {
                     'symbol': symbol, 'type': 'LONG', 'entry': current_close, 
                     'sl': stop_loss, 'tp': take_profit, 'time': waktu_sekarang
                 }
-                
                 bot.send_message(TELEGRAM_CHAT_ID, f"🎯 *RETEST SUCCESS (ENTRY LONG)*\n\nPair: `{symbol}`\n📥 Entry: `{current_close:.4f}`\n🛑 SL: `{stop_loss:.4f}` | 🎯 TP: `{take_profit:.4f}`", parse_mode='Markdown')
 
         elif prev_close < support and volume_valid and current_close < ema200_macro and current_rsi > 30:
@@ -506,15 +394,13 @@ def scan_breakout_retest(symbol):
                 take_profit = current_close - (risk * 2)
                 
                 pair_states[symbol] = {'status': 'IN_SHORT', 'level': target_sup, 'sl': stop_loss, 'tp': take_profit}
-                
-                # MASUKKAN KE DAFTAR POSISI OPEN
                 open_trades[symbol] = {
                     'symbol': symbol, 'type': 'SHORT', 'entry': current_close, 
                     'sl': stop_loss, 'tp': take_profit, 'time': waktu_sekarang
                 }
-                
                 bot.send_message(TELEGRAM_CHAT_ID, f"🎯 *RETEST SUCCESS (ENTRY SHORT)*\n\nPair: `{symbol}`\n📥 Entry: `{current_close:.4f}`\n🛑 SL: `{stop_loss:.4f}` | 🎯 TP: `{take_profit:.4f}`", parse_mode='Markdown')
 
+        # Batalkan breakout jika harga terlalu jauh menembus ke dalam kembali (invalid)
         if pair_states[symbol]['status'] == 'BREAKOUT_BULLISH' and current_close < target_res * 0.995:
             pair_states[symbol] = {'status': 'NONE', 'level': 0.0, 'sl': 0.0, 'tp': 0.0}
         elif pair_states[symbol]['status'] == 'BREAKOUT_BEARISH' and current_close > target_sup * 1.005:
@@ -522,26 +408,23 @@ def scan_breakout_retest(symbol):
 
     except Exception as e:
         print(f"Error scan {symbol}: {e}")
-  
+
 # --- SECTION 5: MAIN EXECUTION ---
 
 def main():
     print("Memulai aplikasi...")
     
-    # Nyalakan Telegram listener di thread terpisah
     tele_thread = threading.Thread(target=run_telegram_bot)
     tele_thread.daemon = True
     tele_thread.start()
 
-    # Kirim satu kali pesan inisialisasi sukses ke Telegram
-    bot.send_message(TELEGRAM_CHAT_ID, f"🤖 *Bot OKX High-Winrate Engine Aktif!* 🎉\n\nMemantau {len(active_pairs)} koin di OKX Futures secara real-time.", parse_mode='Markdown')
+    bot.send_message(TELEGRAM_CHAT_ID, f"🤖 *Bot OKX Engine Aktif!* 🎉\n\nMemantau {len(active_pairs)} koin volume terbesar teratas secara real-time.", parse_mode='Markdown')
 
-    # Loop Scanning Market Utama
     while True:
         for symbol in active_pairs:
             scan_breakout_retest(symbol)
-            time.sleep(2)
-        time.sleep(60)
+            time.sleep(2)  # Jeda aman API Rate limit OKX
+        time.sleep(10)
 
 if __name__ == "__main__":
     main()
