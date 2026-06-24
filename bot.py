@@ -132,7 +132,6 @@ def handle_backtest_command(message):
     loading_msg = bot.reply_to(message, f"⏳ _Menghitung Winrate premium untuk {symbol}..._", parse_mode='Markdown')
 
     try:
-        # Ambil data lilin agar aman untuk kalkulasi EMA 200
         candles = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME_LIVE, limit=500)
         
         if not candles or len(candles) < 205:
@@ -144,8 +143,11 @@ def handle_backtest_command(message):
         trigger_level, sl_level, tp_level = 0.0, 0.0, 0.0
 
         for i in range(202, len(candles)):
-            current_high, current_low, current_close = candles[i][2], candles[i][3], candles[i][4]
-            prev_close = candles[i-1][4]
+            current_candle = candles[i]
+            prev_candle = candles[i-1]
+            current_high, current_low, current_close = current_candle[2], current_candle[3], current_candle[4]
+            current_open = current_candle[1]
+            prev_close = prev_candle[4]
             
             hist_candles = candles[i - CANDLE_COUNT - 2 : i - 1]
             if not hist_candles: continue
@@ -174,7 +176,16 @@ def handle_backtest_command(message):
                     trigger_level = support
 
             elif state == 'BREAKOUT_BULLISH':
-                if current_low <= trigger_level * 1.001 and current_close > trigger_level:
+                # --- LOGIKA KONFIRMASI RETEST SECARA HISTORIS (BACKTEST) ---
+                body_size = abs(current_close - current_open)
+                lower_wick = min(current_open, current_close) - current_low
+                
+                # Syarat LONG: Menyentuh area, tutup di atas level, candle hijau (rejection), dan ekor bawah panjang
+                retest_touched = current_low <= trigger_level * 1.002
+                retest_held = current_close > trigger_level * 0.998
+                rejection_valid = current_close > current_open and lower_wick > (body_size * 1.2)
+                
+                if retest_touched and retest_held and rejection_valid:
                     state = 'IN_LONG'
                     sl_level = support
                     risk = current_close - sl_level
@@ -185,7 +196,16 @@ def handle_backtest_command(message):
                     state = 'NONE'
 
             elif state == 'BREAKOUT_BEARISH':
-                if current_high >= trigger_level * 0.999 and current_close < trigger_level:
+                # --- LOGIKA KONFIRMASI RETEST SECARA HISTORIS (BACKTEST) ---
+                body_size = abs(current_close - current_open)
+                upper_wick = current_high - max(current_open, current_close)
+                
+                # Syarat SHORT: Menyentuh area, tutup di bawah level, candle merah (rejection), dan ekor atas panjang
+                retest_touched = current_high >= trigger_level * 0.998
+                retest_held = current_close < trigger_level * 1.002
+                rejection_valid = current_close < current_open and upper_wick > (body_size * 1.2)
+                
+                if retest_touched and retest_held and rejection_valid:
                     state = 'IN_SHORT'
                     sl_level = resistance
                     risk = sl_level - current_close
@@ -206,7 +226,7 @@ def handle_backtest_command(message):
         winrate = (wins / total_trades * 100) if total_trades > 0 else 0.0
         
         report_text = (
-            f"📊 *LAPORAN WINRATE (PREMIUM FILTER)*\n"
+            f"📊 *LAPORAN WINRATE (CONFIRMED RETEST)*\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n"
             f"Aset: `{symbol}` | TF: `{TIMEFRAME_LIVE}`\n"
             f"🔹 Total Sinyal Valid: *{total_trades}*\n"
@@ -295,7 +315,7 @@ def send_open_positions(message):
             pnl_percent = (pnl_nominal / entry_price) * 100
             tipe_emoji = "🔴 SHORT"
 
-        # --- RE-ENGINEERED FORMATTING (100% BEBAS DARI SYNTAXERROR DI SEMUA VERSI PYTHON) ---
+        # Teks berwarna hijau/merah monospace block aman
         pnl_status = "```diff\n"
         if pnl_nominal >= 0:
             pnl_status += "+ Floating Profit: +" + "{:.2f}".format(pnl_percent) + "%\n"
@@ -364,18 +384,20 @@ def handle_category_selection(call):
 def scan_breakout_retest(symbol):
     global open_trades, trade_history, pair_states
     try:
-        # Gunakan limit 100 candle agar data historis di baris max/min support & resistance selalu aman terpenuhi
+        # Menarik data lilin minimal 100 candle agar kalkulasi S&R 50 candle aman tanpa crash
         candles = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME_LIVE, limit=100)
         if len(candles) < CANDLE_COUNT: return
 
         current_candle, prev_candle = candles[-1], candles[-2]
         current_close, current_low, current_high, prev_close = current_candle[4], current_candle[3], current_candle[2], prev_candle[4]
+        current_open = current_candle[1]
 
         if symbol not in pair_states:
             pair_states[symbol] = {'status': 'NONE', 'level': 0.0, 'sl': 0.0, 'tp': 0.0}
 
         waktu_sekarang = time.strftime("%H:%M:%S")
 
+        # ==================== VERIFIKASI MONITORING TRADE RUNNING ====================
         if pair_states[symbol]['status'] == 'IN_LONG':
             sl_level, tp_level = pair_states[symbol]['sl'], pair_states[symbol]['tp']
             if current_low <= sl_level:
@@ -416,6 +438,7 @@ def scan_breakout_retest(symbol):
                 return
             else: return
 
+        # ==================== ANALISIS INDIKATOR PASAR UTAMA ====================
         macro_candles = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME_MACRO, limit=205)
         macro_closes = [c[4] for c in macro_candles]
         ema200_macro = calculate_ema(macro_closes, period=200)
@@ -427,14 +450,28 @@ def scan_breakout_retest(symbol):
         volume_valid = prev_candle[5] > (avg_volume * VOLUME_MULTIPLIER)
         current_rsi = calculate_rsi([c[4] for c in candles], period=14)
 
+        # ==================== DETEKSI BREAKOUT/BREAKDOWN INDUK ====================
         if prev_close > resistance and volume_valid and current_close > ema200_macro and current_rsi < 70:
             if pair_states[symbol]['status'] != 'BREAKOUT_BULLISH':
                 pair_states[symbol] = {'status': 'BREAKOUT_BULLISH', 'level': resistance, 'sl': support, 'tp': 0.0}
-                bot.send_message(TELEGRAM_CHAT_ID, f"🚀 *VALID BULLISH BREAKOUT*\n\nPair: `{symbol.replace('-USDT-SWAP', '')}`\nLevel: {resistance}\n_Menunggu pantulan Retest..._", parse_mode='Markdown')
+                bot.send_message(TELEGRAM_CHAT_ID, f"🚀 *VALID BULLISH BREAKOUT*\n\nPair: `{symbol.replace('-USDT-SWAP', '')}`\nLevel: {resistance}\n_Menunggu konfirmasi pola pantulan Retest..._", parse_mode='Markdown')
 
         elif pair_states[symbol]['status'] == 'BREAKOUT_BULLISH':
             target_res = pair_states[symbol]['level']
-            if current_low <= target_res * 1.001 and current_close > target_res:
+            
+            # Perhitungan anatomi candle rejection
+            body_size = abs(current_close - current_open)
+            lower_wick = min(current_open, current_close) - current_low
+            
+            # Syarat Konfirmasi:
+            # 1. Low candle pernah menyentuh/menembus zona retest level kunci (+/- 0.2%)
+            # 2. Close candle ditutup bertahan di atas level kunci
+            # 3. Candle ditutup Bullish (Hijau) DAN memiliki sumbu bawah (lower wick) yang kuat (minimal 1.2x ukuran body)
+            retest_touched = current_low <= target_res * 1.002
+            retest_held = current_close > target_res * 0.998
+            rejection_confirmed = current_close > current_open and lower_wick > (body_size * 1.2)
+            
+            if retest_touched and retest_held and rejection_confirmed:
                 stop_loss = pair_states[symbol]['sl']
                 risk = current_close - stop_loss
                 if risk <= 0: risk = current_close * 0.005
@@ -442,16 +479,38 @@ def scan_breakout_retest(symbol):
                 
                 pair_states[symbol] = {'status': 'IN_LONG', 'level': target_res, 'sl': stop_loss, 'tp': take_profit}
                 open_trades[symbol] = {'symbol': symbol, 'type': 'LONG', 'entry': current_close, 'sl': stop_loss, 'tp': take_profit, 'time': waktu_sekarang}
-                bot.send_message(TELEGRAM_CHAT_ID, f"🎯 *RETEST SUCCESS (ENTRY LONG)*\n\nPair: `{symbol.replace('-USDT-SWAP', '')}`\n📥 Entry: `{current_close:.4f}`\n🛑 SL: `{stop_loss:.4f}` | 🎯 TP: `{take_profit:.4f}`", parse_mode='Markdown')
+                
+                bot.send_message(
+                    TELEGRAM_CHAT_ID, 
+                    f"🎯 *RETEST SUCCESS (ENTRY LONG)*\n"
+                    f"Penolakan harga terkonfirmasi! Pembeli mendominasi area retest.\n\n"
+                    f"Pair: `{symbol.replace('-USDT-SWAP', '')}`\n"
+                    f"📥 Entry: `{current_close:.4f}`\n"
+                    f"🛑 SL: `{stop_loss:.4f}` | 🎯 TP: `{take_profit:.4f}`", 
+                    parse_mode='Markdown'
+                )
 
         elif prev_close < support and volume_valid and current_close < ema200_macro and current_rsi > 30:
             if pair_states[symbol]['status'] != 'BREAKOUT_BEARISH':
                 pair_states[symbol] = {'status': 'BREAKOUT_BEARISH', 'level': support, 'sl': resistance, 'tp': 0.0}
-                bot.send_message(TELEGRAM_CHAT_ID, f"💥 *VALID BEARISH BREAKDOWN*\n\nPair: `{symbol.replace('-USDT-SWAP', '')}`\nLevel Support Broken: `{support}`\n_Menunggu pantulan Retest..._", parse_mode='Markdown')
+                bot.send_message(TELEGRAM_CHAT_ID, f"💥 *VALID BEARISH BREAKDOWN*\n\nPair: `{symbol.replace('-USDT-SWAP', '')}`\nLevel Support Broken: `{support}`\n_Menunggu konfirmasi pola pantulan Retest..._", parse_mode='Markdown')
 
         elif pair_states[symbol]['status'] == 'BREAKOUT_BEARISH':
             target_sup = pair_states[symbol]['level']
-            if current_high >= target_sup * 0.999 and current_close < target_sup:
+            
+            # Perhitungan anatomi candle rejection
+            body_size = abs(current_close - current_open)
+            upper_wick = current_high - max(current_open, current_close)
+            
+            # Syarat Konfirmasi:
+            # 1. High candle pernah menyentuh/menembus zona retest level kunci (+/- 0.2%)
+            # 2. Close candle ditutup bertahan di bawah level kunci
+            # 3. Candle ditutup Bearish (Merah) DAN memiliki sumbu atas (upper wick) yang kuat (minimal 1.2x ukuran body)
+            retest_touched = current_high >= target_sup * 0.998
+            retest_held = current_close < target_sup * 1.002
+            rejection_confirmed = current_close < current_open and upper_wick > (body_size * 1.2)
+            
+            if retest_touched and retest_held and rejection_confirmed:
                 stop_loss = pair_states[symbol]['sl']
                 risk = stop_loss - current_close
                 if risk <= 0: risk = current_close * 0.005
@@ -459,8 +518,18 @@ def scan_breakout_retest(symbol):
                 
                 pair_states[symbol] = {'status': 'IN_SHORT', 'level': target_sup, 'sl': stop_loss, 'tp': take_profit}
                 open_trades[symbol] = {'symbol': symbol, 'type': 'SHORT', 'entry': current_close, 'sl': stop_loss, 'tp': take_profit, 'time': waktu_sekarang}
-                bot.send_message(TELEGRAM_CHAT_ID, f"🎯 *RETEST SUCCESS (ENTRY SHORT)*\n\nPair: `{symbol.replace('-USDT-SWAP', '')}`\n📥 Entry: `{current_close:.4f}`\n🛑 SL: `{stop_loss:.4f}` | 🎯 TP: `{take_profit:.4f}`", parse_mode='Markdown')
+                
+                bot.send_message(
+                    TELEGRAM_CHAT_ID, 
+                    f"🎯 *RETEST SUCCESS (ENTRY SHORT)*\n"
+                    f"Penolakan harga terkonfirmasi! Penjual mendominasi area retest.\n\n"
+                    f"Pair: `{symbol.replace('-USDT-SWAP', '')}`\n"
+                    f"📥 Entry: `{current_close:.4f}`\n"
+                    f"🛑 SL: `{stop_loss:.4f}` | 🎯 TP: `{take_profit:.4f}`", 
+                    parse_mode='Markdown'
+                )
 
+        # Batalkan breakout/breakdown jika harga melanggar level terlalu dalam sebelum terkonfirmasi
         if pair_states[symbol]['status'] == 'BREAKOUT_BULLISH' and current_close < target_res * 0.995:
             pair_states[symbol] = {'status': 'NONE', 'level': 0.0, 'sl': 0.0, 'tp': 0.0}
         elif pair_states[symbol]['status'] == 'BREAKOUT_BEARISH' and current_close > target_sup * 1.005:
@@ -475,7 +544,7 @@ def main():
     tele_thread.daemon = True
     tele_thread.start()
 
-    bot.send_message(TELEGRAM_CHAT_ID, f"🤖 *Bot OKX Engine Pro Aktif!* 🎉\n\nSemua modul backtest, detail penamaan pair, dan navigasi portfolio dinamis diperbarui.", parse_mode='Markdown', reply_markup=main_menu_keyboard())
+    bot.send_message(TELEGRAM_CHAT_ID, f"🤖 *Bot OKX Engine Pro Aktif!* 🎉\n\nSemua modul backtest, detail penamaan pair, navigasi portfolio dinamis, dan filter konfirmasi retest telah diperbarui.", parse_mode='Markdown', reply_markup=main_menu_keyboard())
 
     while True:
         for symbol in active_pairs:
