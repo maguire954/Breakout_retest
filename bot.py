@@ -25,7 +25,7 @@ try:
     exchange.load_markets()
     all_futures = [symbol for symbol in exchange.symbols if '-USDT-SWAP' in symbol]
     if all_futures:
-        active_pairs = all_futures[:15] # Ambil 15 koin teraktif
+        active_pairs = all_futures[:40] # Ambil 40 koin teraktif
         print(f"Inisialisasi Sukses! Berhasil mengunci {len(active_pairs)} pair koin.")
     else:
         raise ValueError("Daftar symbols OKX kosong.")
