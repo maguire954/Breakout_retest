@@ -406,8 +406,15 @@ def scan_breakout_retest(symbol):
         elif prev_close < support and volume_valid and current_close < ema200_macro and current_rsi > 30:
             if pair_states[symbol]['status'] != 'BREAKOUT_BEARISH':
                 pair_states[symbol] = {'status': 'BREAKOUT_BEARISH', 'level': support, 'sl': resistance, 'tp': 0.0}
-                bot.send_message(TELEGRAM_CHAT_ID, f"💥 *VALID BEARISH BREAKDOWN*\n\nPair: `{support}`\nLevel: {support}\n_Menunggu pantulan Retest..._", parse_mode='Markdown')
-
+                # PERBAIKAN UTAMA: Mengganti {support} menjadi {symbol} pada bagian Pair
+                bot.send_message(
+                    TELEGRAM_CHAT_ID, 
+                    f"💥 *VALID BEARISH BREAKDOWN*\n\n"
+                    f"Pair: `{symbol.replace('-USDT-SWAP', '')}`\n"
+                    f"Level Support Broken: `{support}`\n"
+                    f"_Menunggu pantulan Retest..._", 
+                    parse_mode='Markdown')
+                
         elif pair_states[symbol]['status'] == 'BREAKOUT_BEARISH':
             target_sup = pair_states[symbol]['level']
             if current_high >= target_sup * 0.999 and current_close < target_sup:
