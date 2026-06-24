@@ -258,33 +258,39 @@ def scan_breakout_retest(symbol):
 def main():
     print("Memulai aplikasi...")
     
-    # Jalankan Telegram thread di awal agar bot langsung responsif
+    # 1. Jalankan Telegram thread di awal agar bot langsung responsif
     tele_thread = threading.Thread(target=run_telegram_bot)
     tele_thread.daemon = True
     tele_thread.start()
 
     bot.send_message(TELEGRAM_CHAT_ID, "🤖 *Bot OKX High-Winrate Engine Aktif!* ⚡\n_Sedang memuat data koin dari OKX..._", parse_mode='Markdown')
 
-    # Gunakan perulangan sampai data koin benar-benar berhasil diambil dari OKX
+    # 2. Ambil data koin OKX di awal (Loop ini AKAN BERHENTI jika active_pairs sudah terisi)
     global active_pairs
     while not active_pairs:
         try:
             print("Mencoba mengambil daftar pair dari OKX...")
             exchange.load_markets()
             all_futures = [symbol for symbol in exchange.symbols if '-USDT-SWAP' in symbol]
-            active_pairs = all_futures[:15] # Ambil 15 koin teraktif
-            print(f"Berhasil memuat {len(active_pairs)} pair.")
-            bot.send_message(TELEGRAM_CHAT_ID, "✅ *Daftar koin berhasil dimuat!* Bot siap memantau pasar.", parse_mode='Markdown')
+            if all_futures:
+                active_pairs = all_futures[:15] # Ambil 15 koin teraktif
+                print(f"Berhasil memuat {len(active_pairs)} pair.")
+                # Pesan ini hanya dikirim SATU KALI di sini
+                bot.send_message(TELEGRAM_CHAT_ID, "✅ *Daftar koin berhasil dimuat!* Bot siap memantau pasar.", parse_mode='Markdown')
         except Exception as e:
             print(f"Gagal memuat pasar OKX, mencoba lagi dalam 5 detik... Error: {e}")
             time.sleep(5)
 
-    # Memulai loop scanning market utama
+    # 3. Memulai loop scanning market utama (Pesan sukses TIDAK BOLEH ada di dalam loop ini)
+    print("Memulai loop scanning utama...")
     while True:
         for symbol in active_pairs:
             scan_breakout_retest(symbol)
-            time.sleep(2)
-        time.sleep(60)
+            time.sleep(2) # Jeda agar tidak kena rate limit API
+        
+        print("Siklus scanning selesai. Menunggu 1 menit...")
+        time.sleep(60) # Jeda antar siklus scan market
+
 
 
 if __name__ == "__main__":
