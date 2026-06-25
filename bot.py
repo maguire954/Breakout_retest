@@ -15,6 +15,9 @@ TIMEFRAME_MACRO = '1h'
 CANDLE_COUNT = 50          
 VOLUME_MULTIPLIER = 1.5    
 DB_FILE = "trading_bot.db"
+
+# Otomatis deteksi apakah PostgreSQL Railway tersedia
+DATABASE_URL = os.getenv("DATABASE_URL")
 # =======================================================
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
@@ -24,39 +27,77 @@ pair_states = {}
 active_pairs = []
 
 # =======================================================
-# 🗄️ DATABASE SYSTEM DATABASE MANAGERS
+# 🗄️ DATABASE ENGINE ADAPTIF (POSTGRESQL & SQLITE)
 # =======================================================
 
+def get_db_connection():
+    """Mengembalikan koneksi database yang sesuai (PostgreSQL untuk Railway, SQLite untuk lokal)."""
+    if DATABASE_URL:
+        import psycopg2
+        # Gunakan PostgreSQL bawaan Railway
+        return psycopg2.connect(DATABASE_URL, sslmode='require')
+    else:
+        # Gunakan SQLite lokal sebagai fallback
+        return sqlite3.connect(DB_FILE)
+
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
+    """Membuat tabel database secara otomatis berdasarkan tipe database yang digunakan."""
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS open_trades (
-            symbol TEXT PRIMARY KEY,
-            type TEXT,
-            entry REAL,
-            sl REAL,
-            tp REAL,
-            time TEXT
-        )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS trade_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            symbol TEXT,
-            type TEXT,
-            entry REAL,
-            exit REAL,
-            result TEXT,
-            closed_at TEXT
-        )
-    ''')
+    
+    if DATABASE_URL:
+        # Skema PostgreSQL
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS open_trades (
+                symbol VARCHAR(50) PRIMARY KEY,
+                type VARCHAR(10),
+                entry DOUBLE PRECISION,
+                sl DOUBLE PRECISION,
+                tp DOUBLE PRECISION,
+                time VARCHAR(20)
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS trade_history (
+                id SERIAL PRIMARY KEY,
+                symbol VARCHAR(50),
+                type VARCHAR(10),
+                entry DOUBLE PRECISION,
+                exit DOUBLE PRECISION,
+                result VARCHAR(10),
+                closed_at VARCHAR(20)
+            )
+        ''')
+    else:
+        # Skema SQLite
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS open_trades (
+                symbol TEXT PRIMARY KEY,
+                type TEXT,
+                entry REAL,
+                sl REAL,
+                tp REAL,
+                time TEXT
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS trade_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT,
+                type TEXT,
+                entry REAL,
+                exit REAL,
+                result TEXT,
+                closed_at TEXT
+            )
+        ''')
     conn.commit()
     conn.close()
 
 def load_saved_positions():
+    """Memulihkan data posisi monitoring berjalan dari database saat booting."""
     global pair_states
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT symbol, type, sl, tp FROM open_trades")
     rows = cursor.fetchall()
@@ -65,42 +106,61 @@ def load_saved_positions():
         pair_states[symbol] = {
             'status': 'IN_LONG' if tipe == 'LONG' else 'IN_SHORT',
             'level': 0.0, 
-            'sl': sl,
-            'tp': tp
+            'sl': float(sl),
+            'tp': float(tp)
         }
     conn.close()
     if rows:
-        print(f"📦 Berhasil memulihkan {len(rows)} posisi aktif dari Database SQLite!")
+        print(f"📦 Berhasil memulihkan {len(rows)} posisi aktif dari Database!")
 
 def save_open_trade(symbol, tipe, entry, sl, tp, waktu):
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute(
-        "INSERT OR REPLACE INTO open_trades (symbol, type, entry, sl, tp, time) VALUES (?, ?, ?, ?, ?, ?)",
-        (symbol, tipe, entry, sl, tp, waktu)
-    )
+    if DATABASE_URL:
+        # Syntax Upsert khusus PostgreSQL
+        cursor.execute('''
+            INSERT INTO open_trades (symbol, type, entry, sl, tp, time) 
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (symbol) 
+            DO UPDATE SET type = EXCLUDED.type, entry = EXCLUDED.entry, sl = EXCLUDED.sl, tp = EXCLUDED.tp, time = EXCLUDED.time
+        ''', (symbol, tipe, entry, sl, tp, waktu))
+    else:
+        # Syntax Upsert khusus SQLite
+        cursor.execute(
+            "INSERT OR REPLACE INTO open_trades (symbol, type, entry, sl, tp, time) VALUES (?, ?, ?, ?, ?, ?)",
+            (symbol, tipe, entry, sl, tp, waktu)
+        )
     conn.commit()
     conn.close()
 
 def delete_open_trade(symbol):
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM open_trades WHERE symbol = ?", (symbol,))
+    if DATABASE_URL:
+        cursor.execute("DELETE FROM open_trades WHERE symbol = %s", (symbol,))
+    else:
+        cursor.execute("DELETE FROM open_trades WHERE symbol = ?", (symbol,))
     conn.commit()
     conn.close()
 
 def insert_trade_history(symbol, tipe, entry, exit_price, result, closed_at):
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute(
-        "INSERT INTO trade_history (symbol, type, entry, exit, result, closed_at) VALUES (?, ?, ?, ?, ?, ?)",
-        (symbol, tipe, entry, exit_price, result, closed_at)
-    )
+    if DATABASE_URL:
+        cursor.execute('''
+            INSERT INTO trade_history (symbol, type, entry, exit, result, closed_at) 
+            VALUES (%s, %s, %s, %s, %s, %s)
+        ''', (symbol, tipe, entry, exit_price, result, closed_at))
+    else:
+        cursor.execute('''
+            INSERT INTO trade_history (symbol, type, entry, exit, result, closed_at) 
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (symbol, tipe, entry, exit_price, result, closed_at))
     conn.commit()
     conn.close()
 
 def get_open_trades_dict():
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT symbol, type, entry, sl, tp, time FROM open_trades")
     rows = cursor.fetchall()
@@ -109,13 +169,16 @@ def get_open_trades_dict():
     trades = {}
     for row in rows:
         symbol, tipe, entry, sl, tp, waktu = row
-        trades[symbol] = {'type': tipe, 'entry': entry, 'sl': sl, 'tp': tp, 'time': waktu}
+        trades[symbol] = {'type': tipe, 'entry': float(entry), 'sl': float(sl), 'tp': float(tp), 'time': waktu}
     return trades
 
 def get_recent_history(limit=10):
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT symbol, type, entry, exit, result, closed_at FROM trade_history ORDER BY id DESC LIMIT ?", (limit,))
+    if DATABASE_URL:
+        cursor.execute("SELECT symbol, type, entry, exit, result, closed_at FROM trade_history ORDER BY id DESC LIMIT %s", (limit,))
+    else:
+        cursor.execute("SELECT symbol, type, entry, exit, result, closed_at FROM trade_history ORDER BY id DESC LIMIT ?", (limit,))
     rows = cursor.fetchall()
     conn.close()
     
@@ -123,7 +186,7 @@ def get_recent_history(limit=10):
     for row in rows:
         symbol, tipe, entry, exit_price, result, closed_at = row
         history_list.append({
-            'symbol': symbol, 'type': tipe, 'entry': entry, 'exit': exit_price, 'result': result, 'closed_at': closed_at
+            'symbol': symbol, 'type': tipe, 'entry': float(entry), 'exit': float(exit_price), 'result': result, 'closed_at': closed_at
         })
     return history_list
 
@@ -211,9 +274,10 @@ def pairs_category_keyboard():
 # --- TELEGRAM TEXT HANDLERS ---
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
+    db_type = "PostgreSQL" if DATABASE_URL else "SQLite"
     welcome_text = (
-        "👋 *Selamat datang di Dashboard OKX Futures Pro Engine (Database Ver.)!*\n\n"
-        "Gunakan tombol *Reply Keyboard* di bagian bawah layar Anda untuk bernavigasi."
+        f"👋 *Selamat datang di Dashboard OKX Futures Pro Engine (Adaptive Db Ver.)!*\n\n"
+        f"Gunakan tombol *Reply Keyboard* di bagian bawah layar Anda untuk bernavigasi."
     )
     bot.send_message(message.chat.id, welcome_text, parse_mode='Markdown', reply_markup=main_menu_keyboard())
 
@@ -349,7 +413,8 @@ def handle_reply_keyboard(message):
     elif text == "📜 Histori Trade":
         send_trade_history(message)
     elif text == "🤖 Status Sistem":
-        bot.reply_to(message, f"✅ *Bot Status:* Online.\n🎯 *Engine:* Memantau {len(active_pairs)} koin.\n🗄️ *Database:* SQLite Terkoneksi & Aman.", parse_mode='Markdown')
+        db_type = "PostgreSQL (Railway)" if DATABASE_URL else "SQLite"
+        bot.reply_to(message, f"✅ *Bot Status:* Online.\n🎯 *Engine:* Memantau {len(active_pairs)} koin.\n🗄️ *Database:* {db_type} Terkoneksi & Aman.", parse_mode='Markdown')
 
 def send_active_patterns(message):
     waiting_retest = [symbol for symbol, data in pair_states.items() if data['status'] in ['BREAKOUT_BULLISH', 'BREAKOUT_BEARISH']]
@@ -412,7 +477,6 @@ def send_open_positions(message):
     except: pass
     bot.send_message(message.chat.id, text, parse_mode='Markdown')
 
-# --- MODIFIKASI 1: HISTORI DENGAN PERSENTASE P&L ---
 def send_trade_history(message):
     history = get_recent_history(10)
     if not history:
@@ -425,7 +489,6 @@ def send_trade_history(message):
         entry = data['entry']
         exit_price = data['exit']
         
-        # Hitung Persentase Riwayat P&L
         if tipe == 'LONG':
             pnl_pct = ((exit_price - entry) / entry) * 100
         else:
@@ -480,7 +543,6 @@ def scan_breakout_retest(symbol):
 
         waktu_sekarang = time.strftime("%H:%M:%S")
 
-        # --- MODIFIKASI 2: P&L PERSEN PADA REALTIME CLOSING NOTIFICATION ---
         # Monitoring Jika Berstatus LONG
         if pair_states[symbol]['status'] == 'IN_LONG':
             sl_level, tp_level = pair_states[symbol]['sl'], pair_states[symbol]['tp']
@@ -605,7 +667,7 @@ def main():
     tele_thread.daemon = True
     tele_thread.start()
 
-    bot.send_message(TELEGRAM_CHAT_ID, f"🤖 *Bot OKX Engine Pro v2.1 Aktif!* 🎉\n\nModul penghitung persentase profit riwayat & trade closed telah berhasil diterapkan.", parse_mode='Markdown', reply_markup=main_menu_keyboard())
+    bot.send_message(TELEGRAM_CHAT_ID, f"🤖 *Bot OKX Engine Pro v2.2 Aktif!* 🎉\n\nSistem database SQL adaptif telah terhubung dengan sukses.", parse_mode='Markdown', reply_markup=main_menu_keyboard())
 
     while True:
         for symbol in active_pairs:
