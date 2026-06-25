@@ -16,7 +16,7 @@ CANDLE_COUNT = 50
 VOLUME_MULTIPLIER = 1.5    
 DB_FILE = "trading_bot.db"
 
-# Otomatis deteksi apakah PostgreSQL Railway tersedia
+# Otomatis deteksi koneksi PostgreSQL dari Railway
 DATABASE_URL = os.getenv("DATABASE_URL")
 # =======================================================
 
@@ -42,153 +42,179 @@ def get_db_connection():
 
 def init_db():
     """Membuat tabel database secara otomatis berdasarkan tipe database yang digunakan."""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    if DATABASE_URL:
-        # Skema PostgreSQL
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS open_trades (
-                symbol VARCHAR(50) PRIMARY KEY,
-                type VARCHAR(10),
-                entry DOUBLE PRECISION,
-                sl DOUBLE PRECISION,
-                tp DOUBLE PRECISION,
-                time VARCHAR(20)
-            )
-        ''')
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS trade_history (
-                id SERIAL PRIMARY KEY,
-                symbol VARCHAR(50),
-                type VARCHAR(10),
-                entry DOUBLE PRECISION,
-                exit DOUBLE PRECISION,
-                result VARCHAR(10),
-                closed_at VARCHAR(20)
-            )
-        ''')
-    else:
-        # Skema SQLite
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS open_trades (
-                symbol TEXT PRIMARY KEY,
-                type TEXT,
-                entry REAL,
-                sl REAL,
-                tp REAL,
-                time TEXT
-            )
-        ''')
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS trade_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                symbol TEXT,
-                type TEXT,
-                entry REAL,
-                exit REAL,
-                result TEXT,
-                closed_at TEXT
-            )
-        ''')
-    conn.commit()
-    conn.close()
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        if DATABASE_URL:
+            print("🐘 Mencoba menginisialisasi tabel di PostgreSQL Railway...")
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS open_trades (
+                    symbol VARCHAR(50) PRIMARY KEY,
+                    type VARCHAR(10),
+                    entry DOUBLE PRECISION,
+                    sl DOUBLE PRECISION,
+                    tp DOUBLE PRECISION,
+                    time VARCHAR(20)
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS trade_history (
+                    id SERIAL PRIMARY KEY,
+                    symbol VARCHAR(50),
+                    type VARCHAR(10),
+                    entry DOUBLE PRECISION,
+                    exit DOUBLE PRECISION,
+                    result VARCHAR(10),
+                    closed_at VARCHAR(20)
+                )
+            ''')
+            print("🐘 Tabel PostgreSQL sukses diverifikasi dan dibuat!")
+        else:
+            print("⚠️ DATABASE_URL tidak ditemukan! Menggunakan SQLite lokal...")
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS open_trades (
+                    symbol TEXT PRIMARY KEY,
+                    type TEXT,
+                    entry REAL,
+                    sl REAL,
+                    tp REAL,
+                    time TEXT
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS trade_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol TEXT,
+                    type TEXT,
+                    entry REAL,
+                    exit REAL,
+                    result TEXT,
+                    closed_at TEXT
+                )
+            ''')
+            print("💾 Tabel SQLite sukses diverifikasi dan dibuat!")
+            
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"❌ ERROR INISIALISASI DATABASE: {str(e)}")
 
 def load_saved_positions():
     """Memulihkan data posisi monitoring berjalan dari database saat booting."""
-    global pair_states
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT symbol, type, sl, tp FROM open_trades")
-    rows = cursor.fetchall()
-    for row in rows:
-        symbol, tipe, sl, tp = row
-        pair_states[symbol] = {
-            'status': 'IN_LONG' if tipe == 'LONG' else 'IN_SHORT',
-            'level': 0.0, 
-            'sl': float(sl),
-            'tp': float(tp)
-        }
-    conn.close()
-    if rows:
-        print(f"📦 Berhasil memulihkan {len(rows)} posisi aktif dari Database!")
+    try:
+        global pair_states
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT symbol, type, sl, tp FROM open_trades")
+        rows = cursor.fetchall()
+        for row in rows:
+            symbol, tipe, sl, tp = row
+            pair_states[symbol] = {
+                'status': 'IN_LONG' if tipe == 'LONG' else 'IN_SHORT',
+                'level': 0.0, 
+                'sl': float(sl),
+                'tp': float(tp)
+            }
+        conn.close()
+        if rows:
+            print(f"📦 Berhasil memulihkan {len(rows)} posisi aktif dari Database!")
+    except Exception as e:
+        print(f"❌ Gagal memulihkan posisi dari database: {str(e)}")
 
 def save_open_trade(symbol, tipe, entry, sl, tp, waktu):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    if DATABASE_URL:
-        # Syntax Upsert khusus PostgreSQL
-        cursor.execute('''
-            INSERT INTO open_trades (symbol, type, entry, sl, tp, time) 
-            VALUES (%s, %s, %s, %s, %s, %s)
-            ON CONFLICT (symbol) 
-            DO UPDATE SET type = EXCLUDED.type, entry = EXCLUDED.entry, sl = EXCLUDED.sl, tp = EXCLUDED.tp, time = EXCLUDED.time
-        ''', (symbol, tipe, entry, sl, tp, waktu))
-    else:
-        # Syntax Upsert khusus SQLite
-        cursor.execute(
-            "INSERT OR REPLACE INTO open_trades (symbol, type, entry, sl, tp, time) VALUES (?, ?, ?, ?, ?, ?)",
-            (symbol, tipe, entry, sl, tp, waktu)
-        )
-    conn.commit()
-    conn.close()
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        if DATABASE_URL:
+            # Syntax Upsert khusus PostgreSQL
+            cursor.execute('''
+                INSERT INTO open_trades (symbol, type, entry, sl, tp, time) 
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (symbol) 
+                DO UPDATE SET type = EXCLUDED.type, entry = EXCLUDED.entry, sl = EXCLUDED.sl, tp = EXCLUDED.tp, time = EXCLUDED.time
+            ''', (symbol, tipe, entry, sl, tp, waktu))
+        else:
+            # Syntax Upsert khusus SQLite
+            cursor.execute(
+                "INSERT OR REPLACE INTO open_trades (symbol, type, entry, sl, tp, time) VALUES (?, ?, ?, ?, ?, ?)",
+                (symbol, tipe, entry, sl, tp, waktu)
+            )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"❌ Gagal menyimpan open trade ke DB: {str(e)}")
 
 def delete_open_trade(symbol):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    if DATABASE_URL:
-        cursor.execute("DELETE FROM open_trades WHERE symbol = %s", (symbol,))
-    else:
-        cursor.execute("DELETE FROM open_trades WHERE symbol = ?", (symbol,))
-    conn.commit()
-    conn.close()
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        if DATABASE_URL:
+            cursor.execute("DELETE FROM open_trades WHERE symbol = %s", (symbol,))
+        else:
+            cursor.execute("DELETE FROM open_trades WHERE symbol = ?", (symbol,))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"❌ Gagal menghapus open trade dari DB: {str(e)}")
 
 def insert_trade_history(symbol, tipe, entry, exit_price, result, closed_at):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    if DATABASE_URL:
-        cursor.execute('''
-            INSERT INTO trade_history (symbol, type, entry, exit, result, closed_at) 
-            VALUES (%s, %s, %s, %s, %s, %s)
-        ''', (symbol, tipe, entry, exit_price, result, closed_at))
-    else:
-        cursor.execute('''
-            INSERT INTO trade_history (symbol, type, entry, exit, result, closed_at) 
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (symbol, tipe, entry, exit_price, result, closed_at))
-    conn.commit()
-    conn.close()
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        if DATABASE_URL:
+            cursor.execute('''
+                INSERT INTO trade_history (symbol, type, entry, exit, result, closed_at) 
+                VALUES (%s, %s, %s, %s, %s, %s)
+            ''', (symbol, tipe, entry, exit_price, result, closed_at))
+        else:
+            cursor.execute('''
+                INSERT INTO trade_history (symbol, type, entry, exit, result, closed_at) 
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (symbol, tipe, entry, exit_price, result, closed_at))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"❌ Gagal menyimpan trade history ke DB: {str(e)}")
 
 def get_open_trades_dict():
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT symbol, type, entry, sl, tp, time FROM open_trades")
-    rows = cursor.fetchall()
-    conn.close()
-    
-    trades = {}
-    for row in rows:
-        symbol, tipe, entry, sl, tp, waktu = row
-        trades[symbol] = {'type': tipe, 'entry': float(entry), 'sl': float(sl), 'tp': float(tp), 'time': waktu}
-    return trades
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT symbol, type, entry, sl, tp, time FROM open_trades")
+        rows = cursor.fetchall()
+        conn.close()
+        
+        trades = {}
+        for row in rows:
+            symbol, tipe, entry, sl, tp, waktu = row
+            trades[symbol] = {'type': tipe, 'entry': float(entry), 'sl': float(sl), 'tp': float(tp), 'time': waktu}
+        return trades
+    except Exception as e:
+        print(f"❌ Gagal membaca open trades dari DB: {str(e)}")
+        return {}
 
 def get_recent_history(limit=10):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    if DATABASE_URL:
-        cursor.execute("SELECT symbol, type, entry, exit, result, closed_at FROM trade_history ORDER BY id DESC LIMIT %s", (limit,))
-    else:
-        cursor.execute("SELECT symbol, type, entry, exit, result, closed_at FROM trade_history ORDER BY id DESC LIMIT ?", (limit,))
-    rows = cursor.fetchall()
-    conn.close()
-    
-    history_list = []
-    for row in rows:
-        symbol, tipe, entry, exit_price, result, closed_at = row
-        history_list.append({
-            'symbol': symbol, 'type': tipe, 'entry': float(entry), 'exit': float(exit_price), 'result': result, 'closed_at': closed_at
-        })
-    return history_list
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        if DATABASE_URL:
+            cursor.execute("SELECT symbol, type, entry, exit, result, closed_at FROM trade_history ORDER BY id DESC LIMIT %s", (limit,))
+        else:
+            cursor.execute("SELECT symbol, type, entry, exit, result, closed_at FROM trade_history ORDER BY id DESC LIMIT ?", (limit,))
+        rows = cursor.fetchall()
+        conn.close()
+        
+        history_list = []
+        for row in rows:
+            symbol, tipe, entry, exit_price, result, closed_at = row
+            history_list.append({
+                'symbol': symbol, 'type': tipe, 'entry': float(entry), 'exit': float(exit_price), 'result': result, 'closed_at': closed_at
+            })
+        return history_list
+    except Exception as e:
+        print(f"❌ Gagal membaca trade history dari DB: {str(e)}")
+        return []
 
 # =======================================================
 # 🌐 ENGINE PRO INITIALIZATION
@@ -413,7 +439,7 @@ def handle_reply_keyboard(message):
     elif text == "📜 Histori Trade":
         send_trade_history(message)
     elif text == "🤖 Status Sistem":
-        db_type = "PostgreSQL (Railway)" if DATABASE_URL else "SQLite"
+        db_type = "PostgreSQL (Railway)" if DATABASE_URL else "SQLite (Fallback)"
         bot.reply_to(message, f"✅ *Bot Status:* Online.\n🎯 *Engine:* Memantau {len(active_pairs)} koin.\n🗄️ *Database:* {db_type} Terkoneksi & Aman.", parse_mode='Markdown')
 
 def send_active_patterns(message):
