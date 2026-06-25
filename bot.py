@@ -28,10 +28,8 @@ active_pairs = []
 # =======================================================
 
 def init_db():
-    """Membuat file database dan tabel yang dibutuhkan secara otomatis jika belum ada."""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    # Tabel untuk mengawal trade yang sedang berjalan (Open)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS open_trades (
             symbol TEXT PRIMARY KEY,
@@ -42,7 +40,6 @@ def init_db():
             time TEXT
         )
     ''')
-    # Tabel untuk merekam riwayat trade yang sudah selesai
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS trade_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -58,7 +55,6 @@ def init_db():
     conn.close()
 
 def load_saved_positions():
-    """Memulihkan kondisi monitoring pair_states dari database saat bot dinyalakan ulang."""
     global pair_states
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
@@ -151,7 +147,6 @@ try:
         print(f"🔥 Sukses mengunci {len(active_pairs)} koin dengan VOLUME TERBESAR di OKX!")
 except Exception as e:
     print(f"Gagal memuat pasar OKX: {e}. Menggunakan list fallback 50 koin...")
-    # KITA AMANKAN KEMBALI MENJADI 50 KOIN LENGKAP DI SINI
     active_pairs = [
         'BTC-USDT-SWAP', 'ETH-USDT-SWAP', 'SOL-USDT-SWAP', 'XRP-USDT-SWAP', 'ADA-USDT-SWAP',
         'AVAX-USDT-SWAP', 'DOT-USDT-SWAP', 'DOGE-USDT-SWAP', 'SHIB-USDT-SWAP', 'LINK-USDT-SWAP',
@@ -332,18 +327,14 @@ def handle_backtest_command(message):
             f"🎯 *OPTIMIZED WIN RATE: {winrate:.2f}%* 🔥"
         )
         
-        try:
-            bot.delete_message(message.chat.id, loading_msg.message_id)
-        except:
-            pass
+        try: bot.delete_message(message.chat.id, loading_msg.message_id)
+        except: pass
             
         bot.reply_to(message, report_text, parse_mode='Markdown')
 
     except Exception as e:
-        try:
-            bot.delete_message(message.chat.id, loading_msg.message_id)
-        except:
-            pass
+        try: bot.delete_message(message.chat.id, loading_msg.message_id)
+        except: pass
         bot.reply_to(message, f"❌ *Gagal memproses backtest.*\nDetail Kendala: `{str(e)}`", parse_mode='Markdown')
 
 @bot.message_handler(func=lambda msg: True)
@@ -421,6 +412,7 @@ def send_open_positions(message):
     except: pass
     bot.send_message(message.chat.id, text, parse_mode='Markdown')
 
+# --- MODIFIKASI 1: HISTORI DENGAN PERSENTASE P&L ---
 def send_trade_history(message):
     history = get_recent_history(10)
     if not history:
@@ -429,8 +421,30 @@ def send_trade_history(message):
     text = f"📜 *RIWAYAT TRANSAKSI TERAKHIR ({len(history)}):*\n━━━━━━━━━━━━━━━━━━━━━\n"
     for data in history:
         coin = data['symbol'].replace('-USDT-SWAP', '')
-        hasil = "✅ TAKE PROFIT" if data['result'] == 'TP' else "❌ STOP LOSS"
-        text += f"• *{coin}* | {hasil}\n  ↕️ Tipe: `{data['type']}`\n  📥 Entry: `{data['entry']:.4f}` | 🚪 Exit: `{data['exit']:.4f}`\n━━━━━━━━━━━━━━━━━━━━━\n"
+        tipe = data['type']
+        entry = data['entry']
+        exit_price = data['exit']
+        
+        # Hitung Persentase Riwayat P&L
+        if tipe == 'LONG':
+            pnl_pct = ((exit_price - entry) / entry) * 100
+        else:
+            pnl_pct = ((entry - exit_price) / entry) * 100
+
+        if data['result'] == 'TP':
+            hasil_text = f"✅ TAKE PROFIT (+{pnl_pct:.2f}%)"
+            emoji_prefix = "🟢"
+        else:
+            hasil_text = f"❌ STOP LOSS ({pnl_pct:.2f}%)"
+            emoji_prefix = "🔴"
+
+        text += (
+            f"• *{coin}* | {emoji_prefix} *{data['result']}*\n"
+            f"  ↕️ Tipe: `{tipe}` | *{pnl_pct:+.2f}%*\n"
+            f"  📥 Entry: `{entry:.4f}` | 🚪 Exit: `{exit_price:.4f}`\n"
+            f"  Status Akhir: {hasil_text}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+        )
     bot.send_message(message.chat.id, text, parse_mode='Markdown')
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('cat_'))
@@ -449,7 +463,7 @@ def handle_category_selection(call):
     bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text=text, parse_mode='Markdown', reply_markup=pairs_category_keyboard())
     bot.answer_callback_query(call.id)
 
-# --- CORE MARKETS SCANNER ---
+# --- CORE MARKETS SCANNER WITH CONFIRMED RETEST ---
 def scan_breakout_retest(symbol):
     global pair_states
     try:
@@ -466,20 +480,25 @@ def scan_breakout_retest(symbol):
 
         waktu_sekarang = time.strftime("%H:%M:%S")
 
+        # --- MODIFIKASI 2: P&L PERSEN PADA REALTIME CLOSING NOTIFICATION ---
         # Monitoring Jika Berstatus LONG
         if pair_states[symbol]['status'] == 'IN_LONG':
             sl_level, tp_level = pair_states[symbol]['sl'], pair_states[symbol]['tp']
+            entry_p = open_trades[symbol]['entry'] if symbol in open_trades else current_close
+            
             if current_low <= sl_level:
-                bot.send_message(TELEGRAM_CHAT_ID, f"🔴 *TRADE CLOSED (STOP LOSS)*\n\nPair: `{symbol.replace('-USDT-SWAP', '')}`\nSL: `{sl_level}`.", parse_mode='Markdown')
+                pnl_pct = ((sl_level - entry_p) / entry_p) * 100
+                bot.send_message(TELEGRAM_CHAT_ID, f"🔴 *TRADE CLOSED (STOP LOSS)*\n\nPair: `{symbol.replace('-USDT-SWAP', '')}`\n📥 Entry: `{entry_p:.4f}`\n🚪 Exit (SL): `{sl_level:.4f}`\n📉 Hasil: *{pnl_pct:.2f}%*", parse_mode='Markdown')
                 if symbol in open_trades:
-                    insert_trade_history(symbol, 'LONG', open_trades[symbol]['entry'], sl_level, 'SL', waktu_sekarang)
+                    insert_trade_history(symbol, 'LONG', entry_p, sl_level, 'SL', waktu_sekarang)
                     delete_open_trade(symbol)
                 pair_states[symbol] = {'status': 'NONE', 'level': 0.0, 'sl': 0.0, 'tp': 0.0}
                 return
             elif current_high >= tp_level:
-                bot.send_message(TELEGRAM_CHAT_ID, f"🟢 *TRADE CLOSED (TAKE PROFIT) 🔥*\n\nPair: `{symbol.replace('-USDT-SWAP', '')}`\nTP: `{tp_level}`!", parse_mode='Markdown')
+                pnl_pct = ((tp_level - entry_p) / entry_p) * 100
+                bot.send_message(TELEGRAM_CHAT_ID, f"🟢 *TRADE CLOSED (TAKE PROFIT) 🔥*\n\nPair: `{symbol.replace('-USDT-SWAP', '')}`\n📥 Entry: `{entry_p:.4f}`\n🚪 Exit (TP): `{tp_level:.4f}`\n📈 Profit: *+{pnl_pct:.2f}%*", parse_mode='Markdown')
                 if symbol in open_trades:
-                    insert_trade_history(symbol, 'LONG', open_trades[symbol]['entry'], tp_level, 'TP', waktu_sekarang)
+                    insert_trade_history(symbol, 'LONG', entry_p, tp_level, 'TP', waktu_sekarang)
                     delete_open_trade(symbol)
                 pair_states[symbol] = {'status': 'NONE', 'level': 0.0, 'sl': 0.0, 'tp': 0.0}
                 return
@@ -488,23 +507,27 @@ def scan_breakout_retest(symbol):
         # Monitoring Jika Berstatus SHORT
         if pair_states[symbol]['status'] == 'IN_SHORT':
             sl_level, tp_level = pair_states[symbol]['sl'], pair_states[symbol]['tp']
+            entry_p = open_trades[symbol]['entry'] if symbol in open_trades else current_close
+            
             if current_high >= sl_level:
-                bot.send_message(TELEGRAM_CHAT_ID, f"🔴 *TRADE CLOSED (STOP LOSS)*\n\nPair: `{symbol.replace('-USDT-SWAP', '')}`\nSL: `{sl_level}`.", parse_mode='Markdown')
+                pnl_pct = ((entry_p - sl_level) / entry_p) * 100
+                bot.send_message(TELEGRAM_CHAT_ID, f"🔴 *TRADE CLOSED (STOP LOSS)*\n\nPair: `{symbol.replace('-USDT-SWAP', '')}`\n📥 Entry: `{entry_p:.4f}`\n🚪 Exit (SL): `{sl_level:.4f}`\n📉 Hasil: *{pnl_pct:.2f}%*", parse_mode='Markdown')
                 if symbol in open_trades:
-                    insert_trade_history(symbol, 'SHORT', open_trades[symbol]['entry'], sl_level, 'SL', waktu_sekarang)
+                    insert_trade_history(symbol, 'SHORT', entry_p, sl_level, 'SL', waktu_sekarang)
                     delete_open_trade(symbol)
                 pair_states[symbol] = {'status': 'NONE', 'level': 0.0, 'sl': 0.0, 'tp': 0.0}
                 return
             elif current_low <= tp_level:
-                bot.send_message(TELEGRAM_CHAT_ID, f"🟢 *TRADE CLOSED (TAKE PROFIT) 🔥*\n\nPair: `{symbol.replace('-USDT-SWAP', '')}`\nTP: `{tp_level}`!", parse_mode='Markdown')
+                pnl_pct = ((entry_p - tp_level) / entry_p) * 100
+                bot.send_message(TELEGRAM_CHAT_ID, f"🟢 *TRADE CLOSED (TAKE PROFIT) 🔥*\n\nPair: `{symbol.replace('-USDT-SWAP', '')}`\n📥 Entry: `{entry_p:.4f}`\n🚪 Exit (TP): `{tp_level:.4f}`\n📈 Profit: *+{pnl_pct:.2f}%*", parse_mode='Markdown')
                 if symbol in open_trades:
-                    insert_trade_history(symbol, 'SHORT', open_trades[symbol]['entry'], tp_level, 'TP', waktu_sekarang)
+                    insert_trade_history(symbol, 'SHORT', entry_p, tp_level, 'TP', waktu_sekarang)
                     delete_open_trade(symbol)
                 pair_states[symbol] = {'status': 'NONE', 'level': 0.0, 'sl': 0.0, 'tp': 0.0}
                 return
             else: return
 
-        # Analisis Sinyal Teknis
+        # Analisis Sinyal Teknis (Confirmed Breakout & Retest)
         macro_candles = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME_MACRO, limit=205)
         macro_closes = [c[4] for c in macro_candles]
         ema200_macro = calculate_ema(macro_closes, period=200)
@@ -575,14 +598,14 @@ def scan_breakout_retest(symbol):
 
 def main():
     print("Memulai aplikasi...")
-    init_db()               # Step 1: Jalankan Database SQLite
-    load_saved_positions()  # Step 2: Pulihkan sisa trade lama jika bot sempat mati
+    init_db()               
+    load_saved_positions()  
     
     tele_thread = threading.Thread(target=run_telegram_bot)
     tele_thread.daemon = True
     tele_thread.start()
 
-    bot.send_message(TELEGRAM_CHAT_ID, f"🤖 *Bot OKX Engine Pro v2.0 Aktif!* 🎉\n\nSistem database SQLite telah terhubung dengan sukses. Portofolio Anda kini aman dari ancaman restart server.", parse_mode='Markdown', reply_markup=main_menu_keyboard())
+    bot.send_message(TELEGRAM_CHAT_ID, f"🤖 *Bot OKX Engine Pro v2.1 Aktif!* 🎉\n\nModul penghitung persentase profit riwayat & trade closed telah berhasil diterapkan.", parse_mode='Markdown', reply_markup=main_menu_keyboard())
 
     while True:
         for symbol in active_pairs:
