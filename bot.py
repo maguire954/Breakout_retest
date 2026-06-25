@@ -150,11 +150,19 @@ try:
     if active_pairs:
         print(f"🔥 Sukses mengunci {len(active_pairs)} koin dengan VOLUME TERBESAR di OKX!")
 except Exception as e:
-    print(f"Gagal memuat pasar OKX: {e}. Menggunakan list fallback...")
+    print(f"Gagal memuat pasar OKX: {e}. Menggunakan list fallback 50 koin...")
+    # KITA AMANKAN KEMBALI MENJADI 50 KOIN LENGKAP DI SINI
     active_pairs = [
         'BTC-USDT-SWAP', 'ETH-USDT-SWAP', 'SOL-USDT-SWAP', 'XRP-USDT-SWAP', 'ADA-USDT-SWAP',
         'AVAX-USDT-SWAP', 'DOT-USDT-SWAP', 'DOGE-USDT-SWAP', 'SHIB-USDT-SWAP', 'LINK-USDT-SWAP',
-        'NEAR-USDT-SWAP', 'MATIC-USDT-SWAP', 'LTC-USDT-SWAP', 'TRX-USDT-SWAP', 'UNI-USDT-SWAP'
+        'NEAR-USDT-SWAP', 'MATIC-USDT-SWAP', 'LTC-USDT-SWAP', 'TRX-USDT-SWAP', 'UNI-USDT-SWAP',
+        'APT-USDT-SWAP', 'OP-USDT-SWAP', 'ARB-USDT-SWAP', 'FIL-USDT-SWAP', 'ATOM-USDT-SWAP',
+        'FTM-USDT-SWAP', 'INJ-USDT-SWAP', 'SUI-USDT-SWAP', 'RNDR-USDT-SWAP', 'GRT-USDT-SWAP',
+        'ICP-USDT-SWAP', 'STX-USDT-SWAP', 'IMX-USDT-SWAP', 'GALA-USDT-SWAP', 'THETA-USDT-SWAP',
+        'WIF-USDT-SWAP', 'PEPE-USDT-SWAP', 'BONK-USDT-SWAP', 'FLOKI-USDT-SWAP', 'TIA-USDT-SWAP',
+        'SEI-USDT-SWAP', 'ORDI-USDT-SWAP', '1INCH-USDT-SWAP', 'AAVE-USDT-SWAP', 'ALGO-USDT-SWAP',
+        'ANKR-USDT-SWAP', 'APE-USDT-SWAP', 'AXS-USDT-SWAP', 'BLUR-USDT-SWAP', 'COMP-USDT-SWAP',
+        'CRV-USDT-SWAP', 'ENS-USDT-SWAP', 'EOS-USDT-SWAP', 'FLOW-USDT-SWAP', 'SAND-USDT-SWAP'
     ]
 
 # --- MATH METRICS CALCULATORS ---
@@ -213,6 +221,130 @@ def send_welcome(message):
         "Gunakan tombol *Reply Keyboard* di bagian bawah layar Anda untuk bernavigasi."
     )
     bot.send_message(message.chat.id, welcome_text, parse_mode='Markdown', reply_markup=main_menu_keyboard())
+
+@bot.message_handler(commands=['backtest'])
+def handle_backtest_command(message):
+    args = message.text.split()
+    if len(args) < 2:
+        bot.reply_to(message, "⚠️ Format: `/backtest <KOIN>` (Contoh: `/backtest BTC`)", parse_mode='Markdown')
+        return
+
+    coin_name = args[1].upper().strip()
+    symbol = f"{coin_name}-USDT-SWAP"
+    loading_msg = bot.reply_to(message, f"⏳ _Menghitung Winrate premium untuk {symbol}..._", parse_mode='Markdown')
+
+    try:
+        candles = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME_LIVE, limit=500)
+        
+        if not candles or len(candles) < 205:
+            bot.reply_to(message, f"❌ Data transaksi historis untuk `{symbol}` tidak mencukupi (Minimal butuh 205 candle).", parse_mode='Markdown')
+            return
+
+        total_trades, wins, losses = 0, 0, 0
+        state = 'NONE'
+        trigger_level, sl_level, tp_level = 0.0, 0.0, 0.0
+
+        for i in range(202, len(candles)):
+            current_candle = candles[i]
+            prev_candle = candles[i-1]
+            current_high, current_low, current_close = current_candle[2], current_candle[3], current_candle[4]
+            current_open = current_candle[1]
+            prev_close = prev_candle[4]
+            
+            hist_candles = candles[i - CANDLE_COUNT - 2 : i - 1]
+            if not hist_candles: continue
+            
+            resistance = max([c[2] for c in hist_candles])
+            support = min([c[3] for c in hist_candles])
+            
+            avg_volume = sum([c[5] for c in hist_candles]) / len(hist_candles)
+            breakout_volume = candles[i-1][5]
+            volume_valid = breakout_volume > (avg_volume * VOLUME_MULTIPLIER)
+            
+            local_closes = [c[4] for c in candles[:i]]
+            
+            current_ema200_macro = calculate_ema(local_closes, period=200) 
+            current_rsi = calculate_rsi(local_closes, period=14)
+
+            if not current_ema200_macro or not current_rsi:
+                continue
+
+            if state == 'NONE':
+                if prev_close > resistance and volume_valid and current_close > current_ema200_macro and current_rsi < 70:
+                    state = 'BREAKOUT_BULLISH'
+                    trigger_level = resistance
+                elif prev_close < support and volume_valid and current_close < current_ema200_macro and current_rsi > 30:
+                    state = 'BREAKOUT_BEARISH'
+                    trigger_level = support
+
+            elif state == 'BREAKOUT_BULLISH':
+                body_size = abs(current_close - current_open)
+                lower_wick = min(current_open, current_close) - current_low
+                
+                retest_touched = current_low <= trigger_level * 1.002
+                retest_held = current_close > trigger_level * 0.998
+                rejection_valid = current_close > current_open and lower_wick > (body_size * 1.2)
+                
+                if retest_touched and retest_held and rejection_valid:
+                    state = 'IN_LONG'
+                    sl_level = support
+                    risk = current_close - sl_level
+                    if risk <= 0: risk = current_close * 0.005
+                    tp_level = current_close + (risk * 2)
+                    total_trades += 1
+                elif current_close < trigger_level * 0.995:
+                    state = 'NONE'
+
+            elif state == 'BREAKOUT_BEARISH':
+                body_size = abs(current_close - current_open)
+                upper_wick = current_high - max(current_open, current_close)
+                
+                retest_touched = current_high >= trigger_level * 0.998
+                retest_held = current_close < trigger_level * 1.002
+                rejection_valid = current_close < current_open and upper_wick > (body_size * 1.2)
+                
+                if retest_touched and retest_held and rejection_valid:
+                    state = 'IN_SHORT'
+                    sl_level = resistance
+                    risk = sl_level - current_close
+                    if risk <= 0: risk = current_close * 0.005
+                    tp_level = current_close - (risk * 2)
+                    total_trades += 1
+                elif current_close > trigger_level * 1.005:
+                    state = 'NONE'
+
+            elif state == 'IN_LONG':
+                if current_low <= sl_level: losses += 1; state = 'NONE'
+                elif current_high >= tp_level: wins += 1; state = 'NONE'
+
+            elif state == 'IN_SHORT':
+                if current_high >= sl_level: losses += 1; state = 'NONE'
+                elif current_low <= tp_level: wins += 1; state = 'NONE'
+
+        winrate = (wins / total_trades * 100) if total_trades > 0 else 0.0
+        
+        report_text = (
+            f"📊 *LAPORAN WINRATE (CONFIRMED RETEST)*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Aset: `{symbol}` | TF: `{TIMEFRAME_LIVE}`\n"
+            f"🔹 Total Sinyal Valid: *{total_trades}*\n"
+            f"🟢 Profit (Wins): *{wins}* | 🔴 Loss: *{losses}*\n\n"
+            f"🎯 *OPTIMIZED WIN RATE: {winrate:.2f}%* 🔥"
+        )
+        
+        try:
+            bot.delete_message(message.chat.id, loading_msg.message_id)
+        except:
+            pass
+            
+        bot.reply_to(message, report_text, parse_mode='Markdown')
+
+    except Exception as e:
+        try:
+            bot.delete_message(message.chat.id, loading_msg.message_id)
+        except:
+            pass
+        bot.reply_to(message, f"❌ *Gagal memproses backtest.*\nDetail Kendala: `{str(e)}`", parse_mode='Markdown')
 
 @bot.message_handler(func=lambda msg: True)
 def handle_reply_keyboard(message):
