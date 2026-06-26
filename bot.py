@@ -273,6 +273,49 @@ def calculate_rsi(prices, period=14):
     if avg_loss == 0: return 100.0
     return 100.0 - (100.0 / (1.0 + (avg_gain / avg_loss)))
 
+def calculate_atr(candles, period=14):
+    """
+    Hitung ATR (Average True Range) dari data candle OHLCV.
+    Candles format CCXT: [timestamp, open, high, low, close, volume]
+    True Range = max(high-low, |high-prev_close|, |low-prev_close|)
+    Return None kalau data tidak cukup.
+    """
+    if len(candles) < period + 1:
+        return None
+    true_ranges = []
+    for i in range(1, len(candles)):
+        high  = candles[i][2]
+        low   = candles[i][3]
+        prev_close = candles[i-1][4]
+        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+        true_ranges.append(tr)
+    if len(true_ranges) < period:
+        return None
+    return sum(true_ranges[-period:]) / period
+
+def get_atr_sl(candles, invalidation, trade_type, atr_multiplier=1.5, fallback_pct=0.5):
+    """
+    Hitung SL berbasis ATR:
+    - LONG: SL = invalidation - (ATR x multiplier)
+    - SHORT: SL = invalidation + (ATR x multiplier)
+    Kalau ATR tidak tersedia, fallback ke buffer flat (fallback_pct % dari invalidation).
+    Selalu ambil SL yang lebih konservatif (lebih jauh dari entry).
+    """
+    atr = calculate_atr(candles, period=14)
+
+    if trade_type == 'LONG':
+        sl_flat = invalidation * (1 - fallback_pct / 100)
+        if atr is None:
+            return sl_flat, "flat"
+        sl_atr = invalidation - atr * atr_multiplier
+        return min(sl_atr, sl_flat), "ATR"  # lebih jauh ke bawah = lebih aman
+    else:  # SHORT
+        sl_flat = invalidation * (1 + fallback_pct / 100)
+        if atr is None:
+            return sl_flat, "flat"
+        sl_atr = invalidation + atr * atr_multiplier
+        return max(sl_atr, sl_flat), "ATR"  # lebih jauh ke atas = lebih aman
+
 def run_telegram_bot():
     print("Telegram Command Listener aktif...")
     bot.infinity_polling()
@@ -641,7 +684,8 @@ def scan_breakout_retest(symbol):
             rejection_confirmed = current_close > current_open and lower_wick > (body_size * 1.2)
             
             if retest_touched and retest_held and rejection_confirmed:
-                stop_loss = pair_states[symbol]['sl']
+                invalidation_long = pair_states[symbol]['sl']  # support level = invalidasi LONG
+                stop_loss, sl_method = get_atr_sl(candles, invalidation_long, 'LONG')
                 risk = current_close - stop_loss
                 if risk <= 0: risk = current_close * 0.005
                 take_profit = current_close + (risk * 2)
@@ -649,7 +693,9 @@ def scan_breakout_retest(symbol):
                 pair_states[symbol] = {'status': 'IN_LONG', 'level': target_res, 'sl': stop_loss, 'tp': take_profit}
                 save_open_trade(symbol, 'LONG', current_close, stop_loss, take_profit, waktu_sekarang)
                 
-                bot.send_message(TELEGRAM_CHAT_ID, f"🎯 *RETEST SUCCESS (ENTRY LONG)*\n\nPair: `{symbol.replace('-USDT-SWAP', '')}`\n📥 Entry: `{current_close:.4f}`\n🛑 SL: `{stop_loss:.4f}` | 🎯 TP: `{take_profit:.4f}`", parse_mode='Markdown')
+                atr_val = calculate_atr(candles, period=14)
+                atr_info = f"ATR14={atr_val:.4f}" if atr_val else "ATR=N/A"
+                bot.send_message(TELEGRAM_CHAT_ID, f"🎯 *RETEST SUCCESS (ENTRY LONG)*\n\nPair: `{symbol.replace('-USDT-SWAP', '')}`\n📥 Entry: `{current_close:.4f}`\n🛑 SL: `{stop_loss:.4f}` ({sl_method}, {atr_info})\n🎯 TP: `{take_profit:.4f}`", parse_mode='Markdown')
 
         elif prev_close < support and volume_valid and current_close < ema200_macro and current_rsi > 30:
             if pair_states[symbol]['status'] != 'BREAKOUT_BEARISH':
@@ -666,7 +712,8 @@ def scan_breakout_retest(symbol):
             rejection_confirmed = current_close < current_open and upper_wick > (body_size * 1.2)
             
             if retest_touched and retest_held and rejection_confirmed:
-                stop_loss = pair_states[symbol]['sl']
+                invalidation_short = pair_states[symbol]['sl']  # resistance level = invalidasi SHORT
+                stop_loss, sl_method = get_atr_sl(candles, invalidation_short, 'SHORT')
                 risk = stop_loss - current_close
                 if risk <= 0: risk = current_close * 0.005
                 take_profit = current_close - (risk * 2)
@@ -674,7 +721,9 @@ def scan_breakout_retest(symbol):
                 pair_states[symbol] = {'status': 'IN_SHORT', 'level': target_sup, 'sl': stop_loss, 'tp': take_profit}
                 save_open_trade(symbol, 'SHORT', current_close, stop_loss, take_profit, waktu_sekarang)
                 
-                bot.send_message(TELEGRAM_CHAT_ID, f"🎯 *RETEST SUCCESS (ENTRY SHORT)*\n\nPair: `{symbol.replace('-USDT-SWAP', '')}`\n📥 Entry: `{current_close:.4f}`\n🛑 SL: `{stop_loss:.4f}` | 🎯 TP: `{take_profit:.4f}`", parse_mode='Markdown')
+                atr_val = calculate_atr(candles, period=14)
+                atr_info = f"ATR14={atr_val:.4f}" if atr_val else "ATR=N/A"
+                bot.send_message(TELEGRAM_CHAT_ID, f"🎯 *RETEST SUCCESS (ENTRY SHORT)*\n\nPair: `{symbol.replace('-USDT-SWAP', '')}`\n📥 Entry: `{current_close:.4f}`\n🛑 SL: `{stop_loss:.4f}` ({sl_method}, {atr_info})\n🎯 TP: `{take_profit:.4f}`", parse_mode='Markdown')
 
         if pair_states[symbol]['status'] == 'BREAKOUT_BULLISH' and current_close < target_res * 0.995:
             pair_states[symbol] = {'status': 'NONE', 'level': 0.0, 'sl': 0.0, 'tp': 0.0}
