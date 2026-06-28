@@ -103,7 +103,7 @@ def init_db():
 def hitung_statistik_performa():
     """
     Mengambil data dari trade_history untuk menghitung winrate 
-    dan performa keseluruhan secara real-time.
+    sesuai dengan kolom database asli (id, symbol, type, entry, exit, result).
     """
     conn = get_db_connection()
     if not conn:
@@ -111,47 +111,46 @@ def hitung_statistik_performa():
         
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            # 1. Ambil hitungan berdasarkan status hasil akhir (Result)
+            # 1. Kueri Utama: Hitung total, menang (TAKE PROFIT), dan kalah (STOP LOSS)
+            # Menyesuaikan dengan string penanda di Histori Chat Anda (TAKE PROFIT / STOP LOSS)
             cur.execute("""
                 SELECT 
                     COUNT(*) as total,
-                    COUNT(CASE WHEN result IN ('TP', 'PROFIT') THEN 1 END) as wins,
-                    COUNT(CASE WHEN result IN ('SL', 'LOSS') THEN 1 END) as losses,
+                    COUNT(CASE WHEN result IN ('TP', 'PROFIT', 'TAKE PROFIT') THEN 1 END) as wins,
+                    COUNT(CASE WHEN result IN ('SL', 'LOSS', 'STOP LOSS') THEN 1 END) as losses,
                     COUNT(CASE WHEN result = 'OPEN' THEN 1 END) as opens
                 FROM trade_history;
             """)
             stats = cur.fetchone()
             
-            # Jika database masih kosong total
             if stats['total'] == 0:
                 return "📝 Belum ada data transaksi di database untuk dihitung."
                 
             total_closed = stats['wins'] + stats['losses']
             winrate = (stats['wins'] / total_closed * 100) if total_closed > 0 else 0
             
-            # 2. Ambil performa per koin (Top 3 koin paling aktif)
+            # 2. Kueri Kedua: Cari 3 Koin Paling Aktif (Perbaikan sintaks WHERE)
             cur.execute("""
                 SELECT symbol, COUNT(*) as qty,
-                COUNT(CASE WHEN result IN ('TP', 'PROFIT') THEN 1 END) as coin_wins
+                COUNT(CASE WHEN result IN ('TP', 'PROFIT', 'TAKE PROFIT') THEN 1 END) as coin_wins
                 FROM trade_history 
-                WHERE result NOT TYPE 'OPEN'
+                WHERE result != 'OPEN'
                 GROUP BY symbol 
                 ORDER BY qty DESC 
                 LIMIT 3;
             """)
             top_coins = cur.fetchall()
             
-            # Susun template laporan teks untuk dikirim ke Telegram
+            # Susun laporan teks final
             laporan = (
-                f"📊 *DASHBOARD STATISTIK BOT TRADING*\n"
+                f"📊 *DASHBOARD STATISTIK TRADING*\n"
                 f"────────────────────────\n"
-                f"📈 Total Sinyal Keluar : *{stats['total']}*\n"
+                f"📈 Total Sinyal Masuk  : *{stats['total']}*\n"
                 f"⏳ Posisi Sedang Aktif : *{stats['opens']}*\n"
-                f"✅ Transaksi Profit (TP) : *{stats['wins']}*\n"
-                f"❌ Transaksi Rugi (SL)  : *{stats['losses']}*\n"
+                f"✅ Transaksi Win (TP)  : *{stats['wins']}*\n"
+                f"❌ Transaksi Lose (SL) : *{stats['losses']}*\n"
                 f"────────────────────────\n"
-                f"🎯 *WIN RATE SYSTEM : {winrate:.2f}%*\n"
-                f"⚖️ *RISK TO REWARD   : 1 : 2*\n"
+                f"🎯 *WIN RATE SYSTEM   : {winrate:.2f}%*\n"
                 f"────────────────────────\n"
             )
             
@@ -163,7 +162,7 @@ def hitung_statistik_performa():
             return laporan
             
     except Exception as e:
-        print(f"⚠️ Gagal menghitung statistik: {e}")
+        print(f"⚠️ SQL Error Detail: {e}")
         return "❌ Gagal memproses data statistik dari database."
     finally:
         conn.close()
