@@ -416,7 +416,7 @@ def send_welcome(message):
         f"👋 *Selamat datang di Dashboard OKX Futures Pro Engine (Adaptive Db Ver.)!*\n\n"
         f"Gunakan tombol *Reply Keyboard* di bagian bawah layar Anda untuk bernavigasi."
     )
-    bot.send_message(message.chat.id, welcome_text, parse_mode='Markdown'
+    bot.send_message(message.chat.id, welcome_text, parse_mode='Markdown')
                      
 @bot.message_handler(commands=['statistik', 'stats'])
 def send_statistics(message):
