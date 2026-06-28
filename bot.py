@@ -100,6 +100,74 @@ def init_db():
     except Exception as e:
         print(f"❌ ERROR INISIALISASI DATABASE: {str(e)}")
 
+def hitung_statistik_performa():
+    """
+    Mengambil data dari trade_history untuk menghitung winrate 
+    dan performa keseluruhan secara real-time.
+    """
+    conn = get_db_connection()
+    if not conn:
+        return None
+        
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # 1. Ambil hitungan berdasarkan status hasil akhir (Result)
+            cur.execute("""
+                SELECT 
+                    COUNT(*) as total,
+                    COUNT(CASE WHEN result IN ('TP', 'PROFIT') THEN 1 END) as wins,
+                    COUNT(CASE WHEN result IN ('SL', 'LOSS') THEN 1 END) as losses,
+                    COUNT(CASE WHEN result = 'OPEN' THEN 1 END) as opens
+                FROM trade_history;
+            """)
+            stats = cur.fetchone()
+            
+            # Jika database masih kosong total
+            if stats['total'] == 0:
+                return "📝 Belum ada data transaksi di database untuk dihitung."
+                
+            total_closed = stats['wins'] + stats['losses']
+            winrate = (stats['wins'] / total_closed * 100) if total_closed > 0 else 0
+            
+            # 2. Ambil performa per koin (Top 3 koin paling aktif)
+            cur.execute("""
+                SELECT symbol, COUNT(*) as qty,
+                COUNT(CASE WHEN result IN ('TP', 'PROFIT') THEN 1 END) as coin_wins
+                FROM trade_history 
+                WHERE result NOT TYPE 'OPEN'
+                GROUP BY symbol 
+                ORDER BY qty DESC 
+                LIMIT 3;
+            """)
+            top_coins = cur.fetchall()
+            
+            # Susun template laporan teks untuk dikirim ke Telegram
+            laporan = (
+                f"📊 *DASHBOARD STATISTIK BOT TRADING*\n"
+                f"────────────────────────\n"
+                f"📈 Total Sinyal Keluar : *{stats['total']}*\n"
+                f"⏳ Posisi Sedang Aktif : *{stats['opens']}*\n"
+                f"✅ Transaksi Profit (TP) : *{stats['wins']}*\n"
+                f"❌ Transaksi Rugi (SL)  : *{stats['losses']}*\n"
+                f"────────────────────────\n"
+                f"🎯 *WIN RATE SYSTEM : {winrate:.2f}%*\n"
+                f"⚖️ *RISK TO REWARD   : 1 : 2*\n"
+                f"────────────────────────\n"
+            )
+            
+            if top_coins:
+                laporan += "🪙 *PERFORMA PASAR TERAKTIF:*\n"
+                for coin in top_coins:
+                    laporan += f"• {coin['symbol']}: {coin['qty']} Trade (Win: {coin['coin_wins']})\n"
+            
+            return laporan
+            
+    except Exception as e:
+        print(f"⚠️ Gagal menghitung statistik: {e}")
+        return "❌ Gagal memproses data statistik dari database."
+    finally:
+        conn.close()
+
 def load_saved_positions():
     """Memulihkan data posisi monitoring berjalan dari database saat booting."""
     try:
@@ -348,7 +416,22 @@ def send_welcome(message):
         f"👋 *Selamat datang di Dashboard OKX Futures Pro Engine (Adaptive Db Ver.)!*\n\n"
         f"Gunakan tombol *Reply Keyboard* di bagian bawah layar Anda untuk bernavigasi."
     )
-    bot.send_message(message.chat.id, welcome_text, parse_mode='Markdown', reply_markup=main_menu_keyboard())
+    bot.send_message(message.chat.id, welcome_text, parse_mode='Markdown'
+                     
+@bot.message_handler(commands=['statistik', 'stats'])
+def send_statistics(message):
+    """Handler Telegram untuk merespons perintah /statistik."""
+    # Kirim status loading kecil ke chat agar user tahu bot sedang menghitung
+    bot.send_chat_action(message.chat.id, 'typing')
+    
+    # Jalankan fungsi hitung
+    hasil_laporan = hitung_statistik_performa()
+    
+    # Kirimkan hasil dashboard ke Telegram
+    if hasil_laporan:
+        bot.send_message(message.chat.id, hasil_laporan, parse_mode="Markdown")
+    else:
+        bot.reply_to(message, "❌ Terjadi kendala saat membaca data PostgreSQL.")
 
 @bot.message_handler(commands=['backtest'])
 def handle_backtest_command(message):
