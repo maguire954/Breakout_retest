@@ -5,6 +5,8 @@ import sqlite3
 import ccxt
 import telebot
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
 # ==================== CONFIGURATION ====================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
