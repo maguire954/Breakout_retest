@@ -102,8 +102,8 @@ def init_db():
 
 def hitung_statistik_performa():
     """
-    Mengambil data dari trade_history untuk menghitung winrate 
-    sesuai dengan kolom database asli (id, symbol, type, entry, exit, result).
+    Mengambil data statistik dengan pencarian kata kunci fleksibel (ILIKE)
+    untuk menghindari error format teks dari database.
     """
     conn = get_db_connection()
     if not conn:
@@ -111,37 +111,37 @@ def hitung_statistik_performa():
         
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            # 1. Kueri Utama: Hitung total, menang (TAKE PROFIT), dan kalah (STOP LOSS)
-            # Menyesuaikan dengan string penanda di Histori Chat Anda (TAKE PROFIT / STOP LOSS)
+            # 1. GUNAKAN ILIKE: Mencari potongan kata tanpa sensitif huruf besar/kecil
             cur.execute("""
                 SELECT 
                     COUNT(*) as total,
-                    COUNT(CASE WHEN result IN ('TP', 'PROFIT', 'TAKE PROFIT') THEN 1 END) as wins,
-                    COUNT(CASE WHEN result IN ('SL', 'LOSS', 'STOP LOSS') THEN 1 END) as losses,
-                    COUNT(CASE WHEN result = 'OPEN' THEN 1 END) as opens
+                    COUNT(CASE WHEN result ILIKE '%PROFIT%' OR result ILIKE '%TP%' THEN 1 END) as wins,
+                    COUNT(CASE WHEN result ILIKE '%LOSS%' OR result ILIKE '%SL%' THEN 1 END) as losses,
+                    COUNT(CASE WHEN result ILIKE '%OPEN%' THEN 1 END) as opens
                 FROM trade_history;
             """)
             stats = cur.fetchone()
             
+            # Jika tabel benar-benar kosong
             if stats['total'] == 0:
                 return "📝 Belum ada data transaksi di database untuk dihitung."
                 
             total_closed = stats['wins'] + stats['losses']
             winrate = (stats['wins'] / total_closed * 100) if total_closed > 0 else 0
             
-            # 2. Kueri Kedua: Cari 3 Koin Paling Aktif (Perbaikan sintaks WHERE)
+            # 2. Kueri Kedua untuk Koin Teraktif dengan ILIKE
             cur.execute("""
                 SELECT symbol, COUNT(*) as qty,
-                COUNT(CASE WHEN result IN ('TP', 'PROFIT', 'TAKE PROFIT') THEN 1 END) as coin_wins
+                COUNT(CASE WHEN result ILIKE '%PROFIT%' OR result ILIKE '%TP%' THEN 1 END) as coin_wins
                 FROM trade_history 
-                WHERE result != 'OPEN'
+                WHERE result NOT ILIKE '%OPEN%'
                 GROUP BY symbol 
                 ORDER BY qty DESC 
                 LIMIT 3;
             """)
             top_coins = cur.fetchall()
             
-            # Susun laporan teks final
+            # Teks Dashboard Telegram
             laporan = (
                 f"📊 *DASHBOARD STATISTIK TRADING*\n"
                 f"────────────────────────\n"
@@ -162,6 +162,7 @@ def hitung_statistik_performa():
             return laporan
             
     except Exception as e:
+        # Menampilkan detail error asli di log Railway Anda agar mudah dilacak jika ada kolom lain yang salah
         print(f"⚠️ SQL Error Detail: {e}")
         return "❌ Gagal memproses data statistik dari database."
     finally:
