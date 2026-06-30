@@ -819,7 +819,7 @@ def send_active_patterns(message):
     bot.send_message(message.chat.id, text, parse_mode='Markdown')
 
 def send_open_positions(message):
-    """Menampilkan semua posisi yang sedang open"""
+    """Menampilkan semua posisi yang sedang open dengan split jika terlalu panjang"""
     try:
         print("DEBUG: send_open_positions dipanggil")
         
@@ -843,10 +843,19 @@ def send_open_positions(message):
             
         print(f"DEBUG: Memproses {len(open_trades)} posisi")
         
-        # Mulai buat teks
-        text = "📊 *DAFTAR POSISI YANG SEDANG OPEN:*\n━━━━━━━━━━━━━━━━━━━━━\n"
+        # Hapus pesan loading
+        try:
+            bot.delete_message(message.chat.id, loading_msg.message_id)
+            print("DEBUG: Pesan loading dihapus")
+        except Exception as e:
+            print(f"DEBUG: Gagal hapus loading message: {e}")
+        
+        # Buat list pesan (split per posisi)
+        messages = []
+        current_message = "📊 *DAFTAR POSISI YANG SEDANG OPEN:*\n━━━━━━━━━━━━━━━━━━━━━\n"
         has_data = False
         error_count = 0
+        pos_count = 0
         
         for symbol, data in open_trades.items():
             try:
@@ -858,7 +867,7 @@ def send_open_positions(message):
                     error_count += 1
                     continue
                 
-                # Pastikan symbol dalam format yang benar
+                # Normalisasi symbol
                 if '/USDT:USDT' in symbol:
                     symbol = symbol.replace('/USDT:USDT', '-USDT-SWAP')
                 elif not symbol.endswith('-SWAP') and 'USDT' in symbol:
@@ -909,8 +918,8 @@ def send_open_positions(message):
                 else:
                     pnl_status = f"❌ *{pnl_percent:.2f}%*"
 
-                # Tambahkan ke teks
-                text += (
+                # Buat teks untuk posisi ini
+                pos_text = (
                     f"• *{coin}* ({tipe_emoji})\n"
                     f"  📥 Entry: `{entry_price:.4f}`\n"
                     f"  ⚡ Current: `{current_price:.4f}`\n"
@@ -918,7 +927,15 @@ def send_open_positions(message):
                     f"  💰 PnL: {pnl_status}\n"
                     f"━━━━━━━━━━━━━━━━━━━━━\n"
                 )
+                
+                # Cek jika menambahkan pos_text akan melebihi batas
+                if len(current_message) + len(pos_text) > 4000:  # Batas aman 4000 karakter
+                    messages.append(current_message)
+                    current_message = "📊 *DAFTAR POSISI YANG SEDANG OPEN (LANJUTAN):*\n━━━━━━━━━━━━━━━━━━━━━\n"
+                
+                current_message += pos_text
                 has_data = True
+                pos_count += 1
                 
             except Exception as e:
                 print(f"❌ Error processing {symbol}: {e}")
@@ -927,22 +944,23 @@ def send_open_positions(message):
                 error_count += 1
                 continue
         
-        # Hapus pesan loading
-        try:
-            bot.delete_message(message.chat.id, loading_msg.message_id)
-            print("DEBUG: Pesan loading dihapus")
-        except Exception as e:
-            print(f"DEBUG: Gagal hapus loading message: {e}")
+        # Tambahkan pesan terakhir jika ada
+        if current_message and current_message != "📊 *DAFTAR POSISI YANG SEDANG OPEN:*\n━━━━━━━━━━━━━━━━━━━━━\n":
+            messages.append(current_message)
         
-        # Kirim hasil
+        # Kirim semua pesan
         if has_data:
-            print("DEBUG: Mengirim hasil dengan data")
-            bot.send_message(message.chat.id, text, parse_mode='Markdown')
+            print(f"DEBUG: Mengirim {len(messages)} pesan dengan {pos_count} posisi")
+            for i, msg in enumerate(messages):
+                if i == 0:
+                    bot.send_message(message.chat.id, msg, parse_mode='Markdown')
+                else:
+                    bot.send_message(message.chat.id, msg, parse_mode='Markdown')
         else:
             print(f"DEBUG: Tidak ada data valid, error_count={error_count}")
             bot.send_message(
                 message.chat.id,
-                f"❌ *Tidak ada data posisi yang valid untuk ditampilkan.*\nTotal posisi: {len(open_trades)}, Error: {error_count}\nGunakan /debug_db untuk cek isi database.",
+                f"❌ *Tidak ada data posisi yang valid untuk ditampilkan.*\nTotal posisi: {len(open_trades)}, Error: {error_count}",
                 parse_mode='Markdown'
             )
             
@@ -957,37 +975,61 @@ def send_open_positions(message):
         )
 
 def send_trade_history(message):
+    """Menampilkan histori trade dengan split jika terlalu panjang"""
     history = get_recent_history(10)
     if not history:
         bot.send_message(message.chat.id, "📜 *Belum ada histori transaksi di database.*", parse_mode='Markdown')
         return
-    text = f"📜 *RIWAYAT TRANSAKSI TERAKHIR ({len(history)}):*\n━━━━━━━━━━━━━━━━━━━━━\n"
+    
+    # Buat list pesan
+    messages = []
+    current_message = f"📜 *RIWAYAT TRANSAKSI TERAKHIR ({len(history)}):*\n━━━━━━━━━━━━━━━━━━━━━\n"
+    
     for data in history:
-        coin = data['symbol'].replace('-USDT-SWAP', '')
-        tipe = data['type']
-        entry = data['entry']
-        exit_price = data['exit']
-        
-        if tipe == 'LONG':
-            pnl_pct = ((exit_price - entry) / entry) * 100
-        else:
-            pnl_pct = ((entry - exit_price) / entry) * 100
+        try:
+            coin = data['symbol'].replace('-USDT-SWAP', '')
+            tipe = data['type']
+            entry = data['entry']
+            exit_price = data['exit']
+            
+            if tipe == 'LONG':
+                pnl_pct = ((exit_price - entry) / entry) * 100
+            else:
+                pnl_pct = ((entry - exit_price) / entry) * 100
 
-        if data['result'] == 'TP':
-            hasil_text = f"✅ TAKE PROFIT (+{pnl_pct:.2f}%)"
-            emoji_prefix = "🟢"
-        else:
-            hasil_text = f"❌ STOP LOSS ({pnl_pct:.2f}%)"
-            emoji_prefix = "🔴"
+            if data['result'] == 'TP':
+                hasil_text = f"✅ TAKE PROFIT (+{pnl_pct:.2f}%)"
+                emoji_prefix = "🟢"
+            else:
+                hasil_text = f"❌ STOP LOSS ({pnl_pct:.2f}%)"
+                emoji_prefix = "🔴"
 
-        text += (
-            f"• *{coin}* | {emoji_prefix} *{data['result']}*\n"
-            f"  ↕️ Tipe: `{tipe}` | *{pnl_pct:+.2f}%*\n"
-            f"  📥 Entry: `{entry:.4f}` | 🚪 Exit: `{exit_price:.4f}`\n"
-            f"  Status Akhir: {hasil_text}\n"
-            f"━━━━━━━━━━━━━━━━━━━━━\n"
-        )
-    bot.send_message(message.chat.id, text, parse_mode='Markdown')
+            pos_text = (
+                f"• *{coin}* | {emoji_prefix} *{data['result']}*\n"
+                f"  ↕️ Tipe: `{tipe}` | *{pnl_pct:+.2f}%*\n"
+                f"  📥 Entry: `{entry:.4f}` | 🚪 Exit: `{exit_price:.4f}`\n"
+                f"  Status Akhir: {hasil_text}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━\n"
+            )
+            
+            # Cek jika menambahkan pos_text akan melebihi batas
+            if len(current_message) + len(pos_text) > 4000:
+                messages.append(current_message)
+                current_message = f"📜 *RIWAYAT TRANSAKSI (LANJUTAN):*\n━━━━━━━━━━━━━━━━━━━━━\n"
+            
+            current_message += pos_text
+            
+        except Exception as e:
+            print(f"Error processing history item: {e}")
+            continue
+    
+    # Tambahkan pesan terakhir
+    if current_message and current_message != f"📜 *RIWAYAT TRANSAKSI TERAKHIR ({len(history)}):*\n━━━━━━━━━━━━━━━━━━━━━\n":
+        messages.append(current_message)
+    
+    # Kirim semua pesan
+    for msg in messages:
+        bot.send_message(message.chat.id, msg, parse_mode='Markdown')
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('cat_'))
 def handle_category_selection(call):
