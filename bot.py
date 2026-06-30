@@ -583,65 +583,42 @@ def send_active_patterns(message):
         text += f"• *{symbol.replace('-USDT-SWAP','')}*: {emoji} | Level Key: `{level}`\n"
     bot.send_message(message.chat.id, text, parse_mode='Markdown')
 
-def send_open_positions(bot, message):
-    """Membaca posisi aktif secara cerdas dari open_trades maupun trade_history fallback (Fix Parameter)."""
-    # Kirim status loading agar user tahu bot sedang bekerja
-    loading_msg = bot.send_message(message.chat.id, "⏳ _Mengambil harga pasar terkini..._", parse_mode='Markdown')
+def send_open_positions(message):
+    """Membaca posisi aktif langsung dari database PostgreSQL/SQLite dengan proteksi trading live."""
+    # Kirim pesan loading agar pengguna tahu bot sedang bekerja membaca harga market OKX
+    loading_msg = bot.send_message(message.chat.id, "⏳ _Mengambil data posisi dan harga pasar OKX..._", parse_mode='Markdown')
     
     try:
-        # 1. Ambil data dari tabel open_trades (Struktur Baru)
+        # Ambil dictionary posisi dari database open_trades Anda
         open_trades = get_open_trades_dict()
         
-        # 2. Fallback: Ambil data dari trade_history yang result-nya 'OPEN' (Struktur Lama)
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        try:
-            if DATABASE_URL:
-                cursor.execute("SELECT symbol, type, entry, stop_loss, take_profit FROM trade_history WHERE result ILIKE '%OPEN%';")
-            else:
-                cursor.execute("SELECT symbol, type, entry, stop_loss, take_profit FROM trade_history WHERE result LIKE '%OPEN%';")
-            rows = cursor.fetchall()
-            for row in rows:
-                sym, tipe, entry, sl, tp = row
-                if sym not in open_trades:
-                    open_trades[sym] = {
-                        'type': tipe,
-                        'entry': float(entry) if entry else 0.0,
-                        'sl': float(sl) if sl else 0.0,
-                        'tp': float(tp) if tp else 0.0,
-                        'time': '-'
-                    }
-        except Exception as db_err:
-            print(f"ℹ️ Info: Kolom lama trade_history tidak terdeteksi atau berbeda ({db_err}), menggunakan data open_trades saja.")
-        finally:
-            conn.close()
-
-        # Jika setelah digabung tetap kosong, kirim pesan info terformat
+        # Jika database benar-benar kosong murni, hapus loading dan beri info terformat
         if not open_trades:
             try: bot.delete_message(message.chat.id, loading_msg.message_id)
             except: pass
-            bot.send_message(message.chat.id, "📭 *Tidak ada posisi trading yang aktif saat ini di database.*", parse_mode='Markdown')
+            bot.send_message(message.chat.id, "📭 *Tidak ada posisi trading yang aktif (OPEN) saat ini di database.*", parse_mode='Markdown')
             return
 
         text = "📊 *DAFTAR POSISI YANG SEDANG OPEN:*\n━━━━━━━━━━━━━━━━━━━━━\n"
         
         for symbol, data in open_trades.items():
-            # Standardisasi tampilan nama koin agar bersih
+            # Standardisasi tampilan nama koin agar bersih di Telegram (Misal: BTC-USDT-SWAP -> BTC)
             coin = symbol.replace('-USDT-SWAP', '').replace('/USDT:USDT', '').replace(':USDT', '')
             tipe = data['type']
-            entry_price = data['entry']
+            entry_price = float(data['entry'])
             
+            # Ambil harga live market dari OKX Swap lewat CCXT
             current_price = entry_price
             try:
-                # Ambil harga live dari OKX swap markets
-                ticker = exchange.fetch_ticker(symbol if '-SWAP' in symbol else f"{coin}-USDT-SWAP")
+                ticker = exchange.fetch_ticker(symbol)
                 if ticker and 'last' in ticker: 
                     current_price = float(ticker['last'])
-            except: 
-                pass
+            except Exception as ticker_err:
+                print(f"⚠️ Gagal mengambil harga live untuk {symbol}: {ticker_err}")
+                # Tetap gunakan entry_price sebagai fallback agar bot tidak crash murni
 
-            # Kalkulasi profit/loss mengambang (Floating PnL)
-            if str(tipe).upper() in ['LONG', 'BUY']:
+            # Kalkulasi profit/loss mengambang (Floating PnL) secara matematis
+            if str(tipe).upper() in ['LONG', 'BUY', 'IN_LONG']:
                 pnl_nominal = current_price - entry_price
                 pnl_percent = (pnl_nominal / entry_price * 100) if entry_price > 0 else 0
                 tipe_emoji = "🟢 LONG"
@@ -650,6 +627,7 @@ def send_open_positions(bot, message):
                 pnl_percent = (pnl_nominal / entry_price * 100) if entry_price > 0 else 0
                 tipe_emoji = "🔴 SHORT"
 
+            # Menggunakan blok format diff Telegram agar warna hijau (+) dan merah (-) terlihat kontras
             pnl_status = "```diff\n"
             if pnl_nominal >= 0:
                 pnl_status += f"+ Floating Profit: +{pnl_percent:.2f}%\n"
@@ -661,21 +639,21 @@ def send_open_positions(bot, message):
                 f"• *{coin}* ({tipe_emoji})\n"
                 f"  📥 Entry: `{entry_price:.4f}`\n"
                 f"  ⚡ Current: `{current_price:.4f}`\n"
-                f"  🛑 SL: `{data['sl']:.4f}` | 🎯 TP: `{data['tp']:.4f}`\n"
+                f"  🛑 SL: `{float(data['sl']):.4f}` | 🎯 TP: `{float(data['tp']):.4f}`\n"
                 f"{pnl_status}\n━━━━━━━━━━━━━━━━━━━━━\n"
             )
             
-        # Hapus loading message sebelum mengirim data final
+        # Hapus loading message sebelum mengirimkan list data final
         try: bot.delete_message(message.chat.id, loading_msg.message_id)
         except: pass
         
         bot.send_message(message.chat.id, text, parse_mode='Markdown')
 
     except Exception as e:
-        print(f"❌ Error pada send_open_positions: {str(e)}")
+        print(f"❌ Error fatal pada send_open_positions: {str(e)}")
         try: bot.delete_message(message.chat.id, loading_msg.message_id)
         except: pass
-        bot.send_message(message.chat.id, f"❌ *Gagal memuat posisi open.*\nDetail: `{str(e)}`", parse_mode='Markdown')
+        bot.send_message(message.chat.id, f"❌ *Gagal memuat posisi open.*\nDetail Error: `{str(e)}`", parse_mode='Markdown')
 
 def send_trade_history(message):
     history = get_recent_history(10)
@@ -769,7 +747,7 @@ def scan_breakout_retest(symbol):
         # Monitoring Jika Berstatus SHORT
         if pair_states[symbol]['status'] == 'IN_SHORT':
             sl_level, tp_level = pair_states[symbol]['sl'], pair_states[symbol]['tp']
-            entry_p = open_trades[symbol]['entry'] if symbol in open_trades else current_close
+            entry_p = open_trades.get(symbol, {}).get('entry', current_close)
             
             if current_high >= sl_level:
                 pnl_pct = ((entry_p - sl_level) / entry_p) * 100
