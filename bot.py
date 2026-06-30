@@ -339,70 +339,90 @@ except Exception as e:
 
 # --- MATH METRICS CALCULATORS ---
 def calculate_ema(prices, period=200):
-    if len(prices) < period: return 0.0
+    """Menghitung EMA, mengembalikan 0.0 jika data tidak cukup"""
+    if not prices or len(prices) < period:
+        return 0.0  # <-- Pastikan return float, bukan None
+    
     k = 2 / (period + 1)
     ema = prices[0]
-    for price in prices[1:]: ema = (price * k) + (ema * (1 - k))
+    for price in prices[1:]:
+        ema = (price * k) + (ema * (1 - k))
     return ema
 
 def calculate_rsi(prices, period=14):
-    if len(prices) < period + 1: return 50.0
+    """Menghitung RSI, mengembalikan 50.0 jika data tidak cukup"""
+    if not prices or len(prices) < period + 1:
+        return 50.0  # <-- Return float, bukan None
+    
     gains, losses = [], []
     for i in range(1, len(prices)):
         change = prices[i] - prices[i-1]
         gains.append(change if change > 0 else 0.0)
         losses.append(abs(change) if change < 0 else 0.0)
+    
     avg_gain = sum(gains[:period]) / period
     avg_loss = sum(losses[:period]) / period
-    if avg_loss == 0: return 100.0
+    
+    if avg_loss == 0:
+        return 100.0
+    
     for i in range(period, len(gains)):
         avg_gain = (avg_gain * (period - 1) + gains[i]) / period
         avg_loss = (avg_loss * (period - 1) + losses[i]) / period
-    if avg_loss == 0: return 100.0
+    
+    if avg_loss == 0:
+        return 100.0
+    
     return 100.0 - (100.0 / (1.0 + (avg_gain / avg_loss)))
 
 def calculate_atr(candles, period=14):
     """
     Hitung ATR (Average True Range) dari data candle OHLCV.
-    Candles format CCXT: [timestamp, open, high, low, close, volume]
-    True Range = max(high-low, |high-prev_close|, |low-prev_close|)
-    Return None kalau data tidak cukup.
+    Mengembalikan 0.0 jika data tidak cukup.
     """
-    if len(candles) < period + 1:
-        return None
+    if not candles or len(candles) < period + 1:
+        return 0.0  # <-- Return float, bukan None
+    
     true_ranges = []
     for i in range(1, len(candles)):
-        high  = candles[i][2]
-        low   = candles[i][3]
-        prev_close = candles[i-1][4]
-        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
-        true_ranges.append(tr)
+        try:
+            high = candles[i][2]
+            low = candles[i][3]
+            prev_close = candles[i-1][4]
+            tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+            true_ranges.append(tr)
+        except Exception as e:
+            print(f"Error calculate ATR: {e}")
+            continue
+    
     if len(true_ranges) < period:
-        return None
+        return 0.0
+    
     return sum(true_ranges[-period:]) / period
 
 def get_atr_sl(candles, invalidation, trade_type, atr_multiplier=1.5, fallback_pct=0.5):
     """
-    Hitung SL berbasis ATR:
-    - LONG: SL = invalidation - (ATR x multiplier)
-    - SHORT: SL = invalidation + (ATR x multiplier)
-    Kalau ATR tidak tersedia, fallback ke buffer flat (fallback_pct % dari invalidation).
-    Selalu ambil SL yang lebih konservatif (lebih jauh dari entry).
+    Hitung SL berbasis ATR.
+    Selalu return tuple (float, str)
     """
+    if not candles or len(candles) < 15:
+        fallback = invalidation * (1 - fallback_pct/100) if trade_type == 'LONG' else invalidation * (1 + fallback_pct/100)
+        return fallback, "flat"
+    
     atr = calculate_atr(candles, period=14)
-
+    
     if trade_type == 'LONG':
         sl_flat = invalidation * (1 - fallback_pct / 100)
-        if atr is None:
+        if atr <= 0:  # <-- Cek atr <= 0, bukan None
             return sl_flat, "flat"
         sl_atr = invalidation - atr * atr_multiplier
-        return min(sl_atr, sl_flat), "ATR"  # lebih jauh ke bawah = lebih aman
+        return min(sl_atr, sl_flat), "ATR"
     else:  # SHORT
         sl_flat = invalidation * (1 + fallback_pct / 100)
-        if atr is None:
+        if atr <= 0:  # <-- Cek atr <= 0, bukan None
             return sl_flat, "flat"
         sl_atr = invalidation + atr * atr_multiplier
-        return max(sl_atr, sl_flat), "ATR"  # lebih jauh ke atas = lebih aman
+        return max(sl_atr, sl_flat), "ATR"
 
 def run_telegram_bot():
     print("Telegram Command Listener aktif...")
@@ -748,6 +768,24 @@ def handle_category_selection(call):
 def scan_breakout_retest(symbol):
     global pair_states
     try:
+        if not symbol:
+            return
+
+    try:
+        candles = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME_LIVE, limit=100)
+    except Exception as e:
+        print(f"Gagal fetch data untuk {symbol}: {e}")
+        return
+
+        if not candles or len(candles) < CANDLE_COUNT:
+            print(f"Data tidak cukup untuk {symbol}: {len(candles)} candles")
+            return
+            
+        for candle in candles:
+            if not candle or len(candle) < 6:
+                print(f"Data candle tidak valid untuk {symbol}")
+                return
+        
         open_trades = get_open_trades_dict()
         candles = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME_LIVE, limit=100)
         if len(candles) < CANDLE_COUNT: return
@@ -843,7 +881,10 @@ def scan_breakout_retest(symbol):
                 save_open_trade(symbol, 'LONG', current_close, stop_loss, take_profit, waktu_sekarang)
                 
                 atr_val = calculate_atr(candles, period=14)
-                atr_info = f"ATR14={atr_val:.4f}" if atr_val else "ATR=N/A"
+                if atr_val > 0:
+                    atr_info = f"ATR14={atr_val:.4f}"
+                else:
+                    atr_info = "ATR=N/A (gunakan flat)"
                 bot.send_message(TELEGRAM_CHAT_ID, f"🎯 *RETEST SUCCESS (ENTRY LONG)*\n\nPair: `{symbol.replace('-USDT-SWAP', '')}`\n📥 Entry: `{current_close:.4f}`\n🛑 SL: `{stop_loss:.4f}` ({sl_method}, {atr_info})\n🎯 TP: `{take_profit:.4f}`", parse_mode='Markdown')
 
         elif prev_close < support and volume_valid and current_close < ema200_macro and current_rsi > 30:
@@ -871,7 +912,10 @@ def scan_breakout_retest(symbol):
                 save_open_trade(symbol, 'SHORT', current_close, stop_loss, take_profit, waktu_sekarang)
                 
                 atr_val = calculate_atr(candles, period=14)
-                atr_info = f"ATR14={atr_val:.4f}" if atr_val else "ATR=N/A"
+                if atr_val > 0:
+                    atr_info = f"ATR14={atr_val:.4f}"
+                else:
+                    atr_info = "ATR=N/A (gunakan flat)"
                 bot.send_message(TELEGRAM_CHAT_ID, f"🎯 *RETEST SUCCESS (ENTRY SHORT)*\n\nPair: `{symbol.replace('-USDT-SWAP', '')}`\n📥 Entry: `{current_close:.4f}`\n🛑 SL: `{stop_loss:.4f}` ({sl_method}, {atr_info})\n🎯 TP: `{take_profit:.4f}`", parse_mode='Markdown')
 
         if pair_states[symbol]['status'] == 'BREAKOUT_BULLISH' and current_close < target_res * 0.995:
@@ -880,7 +924,12 @@ def scan_breakout_retest(symbol):
             pair_states[symbol] = {'status': 'NONE', 'level': 0.0, 'sl': 0.0, 'tp': 0.0}
 
     except Exception as e:
-        print(f"Error scan {symbol}: {e}")
+        print(f"Error scan {symbol}: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        
+        if symbol in pair_states:
+            if pair_states[symbol]['status'] not in ['IN_LONG'], ['IN_SHORT']: pair_states[symbol] = {'status': 'NONE', 'level': 0.0, 'sl': 0.0, 'tp': 0.0}
 
 def main():
     print("Memulai aplikasi...")
