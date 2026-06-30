@@ -248,10 +248,12 @@ def insert_trade_history(symbol, tipe, entry, exit_price, result, closed_at):
         print(f"❌ Gagal menyimpan trade history ke DB: {str(e)}")
 
 def get_open_trades_dict():
+    """Mengembalikan dictionary posisi open dari database"""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
         
+        # Query sesuai tipe database
         if DATABASE_URL:
             cursor.execute("SELECT symbol, type, entry, sl, tp, time FROM open_trades")
         else:
@@ -262,24 +264,35 @@ def get_open_trades_dict():
         
         trades = {}
         for row in rows:
-            if DATABASE_URL:
-                symbol, tipe, entry, sl, tp, waktu = row
-            else:
-                symbol, tipe, entry, sl, tp, waktu = row
+            try:
+                # Pastikan row memiliki 6 elemen
+                if len(row) >= 6:
+                    symbol = str(row[0]) if row[0] is not None else ''
+                    tipe = str(row[1]) if row[1] is not None else 'UNKNOWN'
+                    entry = float(row[2]) if row[2] is not None else 0.0
+                    sl = float(row[3]) if row[3] is not None else 0.0
+                    tp = float(row[4]) if row[4] is not None else 0.0
+                    waktu = str(row[5]) if row[5] is not None else ''
+                    
+                    if symbol and entry > 0 and sl > 0 and tp > 0:
+                        trades[symbol] = {
+                            'type': tipe,
+                            'entry': entry,
+                            'sl': sl,
+                            'tp': tp,
+                            'time': waktu
+                        }
+            except Exception as e:
+                print(f"Error processing row {row}: {e}")
+                continue
                 
-            trades[symbol] = {
-                'type': tipe,
-                'entry': float(entry),
-                'sl': float(sl),
-                'tp': float(tp),
-                'time': waktu
-            }
-            
-        print(f"✅ Berhasil membaca {len(trades)} posisi dari database")  # Log untuk debug
+        print(f"✅ get_open_trades_dict: Menemukan {len(trades)} posisi valid")
         return trades
         
     except Exception as e:
-        print(f"❌ Gagal membaca open trades dari DB: {str(e)}")
+        print(f"❌ Gagal membaca open trades: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return {}
 
 def get_recent_history(limit=10):
@@ -341,7 +354,7 @@ except Exception as e:
 def calculate_ema(prices, period=200):
     """Menghitung EMA, mengembalikan 0.0 jika data tidak cukup"""
     if not prices or len(prices) < period:
-        return 0.0  # <-- Pastikan return float, bukan None
+        return 0.0
     
     k = 2 / (period + 1)
     ema = prices[0]
@@ -352,7 +365,7 @@ def calculate_ema(prices, period=200):
 def calculate_rsi(prices, period=14):
     """Menghitung RSI, mengembalikan 50.0 jika data tidak cukup"""
     if not prices or len(prices) < period + 1:
-        return 50.0  # <-- Return float, bukan None
+        return 50.0
     
     gains, losses = [], []
     for i in range(1, len(prices)):
@@ -415,16 +428,49 @@ def get_atr_sl(candles, invalidation, trade_type, atr_multiplier=1.5, fallback_p
     
     if trade_type == 'LONG':
         sl_flat = invalidation * (1 - fallback_pct / 100)
-        if atr <= 0:  # <-- Cek atr <= 0, bukan None
+        if atr <= 0:
             return sl_flat, "flat"
         sl_atr = invalidation - atr * atr_multiplier
         return min(sl_atr, sl_flat), "ATR"
     else:  # SHORT
         sl_flat = invalidation * (1 + fallback_pct / 100)
-        if atr <= 0:  # <-- Cek atr <= 0, bukan None
+        if atr <= 0:
             return sl_flat, "flat"
         sl_atr = invalidation + atr * atr_multiplier
         return max(sl_atr, sl_flat), "ATR"
+
+def safe_fetch_ticker(symbol):
+    """
+    Mengambil ticker dengan error handling yang aman
+    Mengembalikan dictionary dengan data atau None
+    """
+    try:
+        if not symbol:
+            return None
+            
+        ticker = exchange.fetch_ticker(symbol)
+        if not ticker or not isinstance(ticker, dict):
+            return None
+            
+        # Ambil harga dengan prioritas
+        price = None
+        if 'last' in ticker and ticker['last'] is not None:
+            price = float(ticker['last'])
+        elif 'close' in ticker and ticker['close'] is not None:
+            price = float(ticker['close'])
+        elif 'bid' in ticker and ticker['bid'] is not None:
+            price = float(ticker['bid'])
+        elif 'ask' in ticker and ticker['ask'] is not None:
+            price = float(ticker['ask'])
+            
+        if price is None or price <= 0:
+            return None
+            
+        return {'price': price, 'data': ticker}
+        
+    except Exception as e:
+        print(f"⚠️ Error fetching ticker {symbol}: {e}")
+        return None
 
 def run_telegram_bot():
     print("Telegram Command Listener aktif...")
@@ -459,45 +505,12 @@ def send_welcome(message):
         f"Gunakan tombol *Reply Keyboard* di bagian bawah layar Anda untuk bernavigasi."
     )
     bot.send_message(message.chat.id, welcome_text, parse_mode='Markdown')
-
-@bot.message_handler(commands=['debug_db'])
-def debug_database(message):
-    """Command untuk debug isi database"""
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        # Cek isi open_trades
-        if DATABASE_URL:
-            cursor.execute("SELECT * FROM open_trades")
-        else:
-            cursor.execute("SELECT * FROM open_trades")
-            
-        rows = cursor.fetchall()
-        
-        if not rows:
-            bot.reply_to(message, "📭 *Tabel open_trades kosong*", parse_mode='Markdown')
-        else:
-            text = "📊 *ISI TABEL OPEN_TRADES:*\n━━━━━━━━━━━━━━━━━━━━━\n"
-            for row in rows:
-                text += f"`{row}`\n"
-            bot.reply_to(message, text, parse_mode='Markdown')
-            
-        conn.close()
-        
-    except Exception as e:
-        bot.reply_to(message, f"❌ *Debug error:* `{str(e)}`", parse_mode='Markdown')
-
+                     
 @bot.message_handler(commands=['statistik', 'stats'])
 def send_statistics(message):
     """Handler Telegram untuk merespons perintah /statistik."""
-    # Kirim status loading kecil ke chat agar user tahu bot sedang menghitung
     bot.send_chat_action(message.chat.id, 'typing')
-    
-    # Jalankan fungsi hitung
     hasil_laporan = hitung_statistik_performa()
-    
-    # Kirimkan hasil dashboard ke Telegram
     if hasil_laporan:
         bot.send_message(message.chat.id, hasil_laporan, parse_mode="Markdown")
     else:
@@ -623,6 +636,66 @@ def handle_backtest_command(message):
         except: pass
         bot.reply_to(message, f"❌ *Gagal memproses backtest.*\nDetail Kendala: `{str(e)}`", parse_mode='Markdown')
 
+@bot.message_handler(commands=['debug_db'])
+def debug_database(message):
+    """Command untuk debug isi database"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        if DATABASE_URL:
+            cursor.execute("SELECT * FROM open_trades")
+        else:
+            cursor.execute("SELECT * FROM open_trades")
+            
+        rows = cursor.fetchall()
+        
+        if not rows:
+            bot.reply_to(message, "📭 *Tabel open_trades kosong*", parse_mode='Markdown')
+        else:
+            text = "📊 *ISI TABEL OPEN_TRADES:*\n━━━━━━━━━━━━━━━━━━━━━\n"
+            for row in rows:
+                text += f"`{row}`\n"
+            bot.reply_to(message, text, parse_mode='Markdown')
+            
+        conn.close()
+        
+    except Exception as e:
+        bot.reply_to(message, f"❌ *Debug error:* `{str(e)}`", parse_mode='Markdown')
+
+@bot.message_handler(commands=['debug_open'])
+def debug_open_positions(message):
+    """Debug detail isi open_trades"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        if DATABASE_URL:
+            cursor.execute("SELECT * FROM open_trades")
+        else:
+            cursor.execute("SELECT * FROM open_trades")
+            
+        rows = cursor.fetchall()
+        conn.close()
+        
+        if not rows:
+            bot.reply_to(message, "📭 *Tabel open_trades kosong*", parse_mode='Markdown')
+            return
+            
+        text = "🔍 *DEBUG OPEN_TRADES:*\n━━━━━━━━━━━━━━━━━━━━━\n"
+        text += f"Total rows: {len(rows)}\n\n"
+        
+        for i, row in enumerate(rows, 1):
+            text += f"Row {i}: `{row}`\n"
+            if i >= 10:
+                text += "... (dan seterusnya)\n"
+                break
+                
+        bot.reply_to(message, text, parse_mode='Markdown')
+        
+    except Exception as e:
+        bot.reply_to(message, f"❌ Debug error: `{str(e)}`", parse_mode='Markdown')
+
 @bot.message_handler(func=lambda msg: True)
 def handle_reply_keyboard(message):
     text = message.text
@@ -631,7 +704,16 @@ def handle_reply_keyboard(message):
     elif text == "🎯 Setup Aktif (/pola)":
         send_active_patterns(message)
     elif text == "📊 Posisi Open":
-        send_open_positions(message)
+        try:
+            send_open_positions(message)
+        except Exception as e:
+            bot.reply_to(
+                message,
+                f"❌ *Error saat menampilkan posisi:*\n`{str(e)}`",
+                parse_mode='Markdown'
+            )
+            import traceback
+            traceback.print_exc()
     elif text == "📜 Histori Trade":
         send_trade_history(message)
     elif text == "🤖 Status Sistem":
@@ -652,49 +734,66 @@ def send_active_patterns(message):
     bot.send_message(message.chat.id, text, parse_mode='Markdown')
 
 def send_open_positions(message):
+    """Menampilkan semua posisi yang sedang open"""
     try:
+        # Kirim pesan loading
+        loading_msg = bot.send_message(message.chat.id, "⏳ _Mengambil data posisi..._", parse_mode='Markdown')
+        
+        # Ambil data dari database
         open_trades = get_open_trades_dict()
         
         if not open_trades:
-            bot.send_message(message.chat.id, "📭 *Tidak ada posisi trading yang aktif saat ini.*", parse_mode='Markdown')
+            bot.edit_message_text(
+                "📭 *Tidak ada posisi trading yang aktif saat ini.*",
+                chat_id=message.chat.id,
+                message_id=loading_msg.message_id,
+                parse_mode='Markdown'
+            )
             return
             
-        loading_msg = bot.send_message(message.chat.id, "⏳ _Mengambil harga pasar terkini..._", parse_mode='Markdown')
+        # Mulai buat teks
         text = "📊 *DAFTAR POSISI YANG SEDANG OPEN:*\n━━━━━━━━━━━━━━━━━━━━━\n"
+        has_data = False
         
         for symbol, data in open_trades.items():
             try:
                 coin = symbol.replace('-USDT-SWAP', '')
-                tipe = data['type']
-                entry_price = float(data['entry'])
-                sl_price = float(data['sl'])
-                tp_price = float(data['tp'])
+                tipe = data.get('type', 'UNKNOWN')
+                entry_price = float(data.get('entry', 0))
+                sl_price = float(data.get('sl', 0))
+                tp_price = float(data.get('tp', 0))
                 
-                # Ambil harga terkini
-                current_price = entry_price
+                # Validasi data
+                if entry_price == 0 or sl_price == 0 or tp_price == 0:
+                    print(f"⚠️ Data tidak lengkap untuk {symbol}: {data}")
+                    continue
+                
+                # Ambil harga terkini dengan error handling yang lebih baik
+                current_price = entry_price  # default ke entry price
                 try:
-                    ticker = exchange.fetch_ticker(symbol)
-                    if ticker and 'last' in ticker:
-                        current_price = float(ticker['last'])
+                    ticker_data = safe_fetch_ticker(symbol)
+                    if ticker_data and 'price' in ticker_data:
+                        current_price = ticker_data['price']
                 except Exception as e:
-                    print(f"Gagal fetch ticker {symbol}: {e}")
+                    print(f"⚠️ Gagal fetch ticker {symbol}: {e}")
 
                 # Hitung PnL
-                if tipe == 'LONG':
+                if tipe.upper() == 'LONG':
                     pnl_nominal = current_price - entry_price
                     pnl_percent = (pnl_nominal / entry_price) * 100
                     tipe_emoji = "🟢 LONG"
-                else:  # SHORT
+                else:
                     pnl_nominal = entry_price - current_price
                     pnl_percent = (pnl_nominal / entry_price) * 100
                     tipe_emoji = "🔴 SHORT"
 
-                # Format PnL
+                # Format status PnL
                 if pnl_nominal >= 0:
                     pnl_status = f"✅ *+{pnl_percent:.2f}%*"
                 else:
                     pnl_status = f"❌ *{pnl_percent:.2f}%*"
 
+                # Tambahkan ke teks
                 text += (
                     f"• *{coin}* ({tipe_emoji})\n"
                     f"  📥 Entry: `{entry_price:.4f}`\n"
@@ -703,19 +802,39 @@ def send_open_positions(message):
                     f"  💰 PnL: {pnl_status}\n"
                     f"━━━━━━━━━━━━━━━━━━━━━\n"
                 )
+                has_data = True
+                
             except Exception as e:
-                print(f"Error processing {symbol}: {e}")
+                print(f"❌ Error processing {symbol}: {e}")
+                import traceback
+                traceback.print_exc()
                 continue
         
-        try: 
+        # Hapus pesan loading
+        try:
             bot.delete_message(message.chat.id, loading_msg.message_id)
-        except: 
+        except:
             pass
-            
-        bot.send_message(message.chat.id, text, parse_mode='Markdown')
         
+        # Kirim hasil
+        if has_data:
+            bot.send_message(message.chat.id, text, parse_mode='Markdown')
+        else:
+            bot.send_message(
+                message.chat.id,
+                "❌ *Tidak ada data posisi yang valid untuk ditampilkan.*\nGunakan /debug_db untuk cek isi database.",
+                parse_mode='Markdown'
+            )
+            
     except Exception as e:
-        bot.reply_to(message, f"❌ *Gagal menampilkan posisi open.*\nDetail: `{str(e)}`", parse_mode='Markdown')
+        print(f"❌ Error di send_open_positions: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        bot.reply_to(
+            message,
+            f"❌ *Gagal menampilkan posisi open.*\nDetail: `{str(e)}`",
+            parse_mode='Markdown'
+        )
 
 def send_trade_history(message):
     history = get_recent_history(10)
@@ -943,11 +1062,15 @@ def scan_breakout_retest(symbol):
                     
                 bot.send_message(TELEGRAM_CHAT_ID, f"🎯 *RETEST SUCCESS (ENTRY SHORT)*\n\nPair: `{symbol.replace('-USDT-SWAP', '')}`\n📥 Entry: `{current_close:.4f}`\n🛑 SL: `{stop_loss:.4f}` ({sl_method}, {atr_info})\n🎯 TP: `{take_profit:.4f}`", parse_mode='Markdown')
 
-        # Reset jika breakout gagal
-        if pair_states[symbol]['status'] == 'BREAKOUT_BULLISH' and current_close < target_res * 0.995:
-            pair_states[symbol] = {'status': 'NONE', 'level': 0.0, 'sl': 0.0, 'tp': 0.0}
-        elif pair_states[symbol]['status'] == 'BREAKOUT_BEARISH' and current_close > target_sup * 1.005:
-            pair_states[symbol] = {'status': 'NONE', 'level': 0.0, 'sl': 0.0, 'tp': 0.0}
+        # Reset jika breakout gagal (gunakan variabel yang sudah didefinisikan)
+        if pair_states[symbol]['status'] == 'BREAKOUT_BULLISH':
+            target_res = pair_states[symbol]['level']
+            if current_close < target_res * 0.995:
+                pair_states[symbol] = {'status': 'NONE', 'level': 0.0, 'sl': 0.0, 'tp': 0.0}
+        elif pair_states[symbol]['status'] == 'BREAKOUT_BEARISH':
+            target_sup = pair_states[symbol]['level']
+            if current_close > target_sup * 1.005:
+                pair_states[symbol] = {'status': 'NONE', 'level': 0.0, 'sl': 0.0, 'tp': 0.0}
 
     except Exception as e:
         # Log error dengan detail
