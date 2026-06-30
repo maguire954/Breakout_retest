@@ -478,12 +478,14 @@ def run_telegram_bot():
 
 # --- KEYBOARDS ---
 def main_menu_keyboard():
+    """Membuat keyboard dengan emoji yang tepat"""
     markup = ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
-    markup.add(
-        KeyboardButton("🔍 Pantauan Koin"), KeyboardButton("🎯 Setup Aktif (/pola)"),
-        KeyboardButton("📊 Posisi Open"), KeyboardButton("📜 Histori Trade"),
-        KeyboardButton("🤖 Status Sistem")
-    )
+    btn1 = KeyboardButton("🔍 Pantauan Koin")
+    btn2 = KeyboardButton("🎯 Setup Aktif (/pola)")
+    btn3 = KeyboardButton("📊 Posisi Open")
+    btn4 = KeyboardButton("📜 Histori Trade")
+    btn5 = KeyboardButton("🤖 Status Sistem")
+    markup.add(btn1, btn2, btn3, btn4, btn5)
     return markup
 
 def pairs_category_keyboard():
@@ -506,6 +508,42 @@ def send_welcome(message):
     )
     bot.send_message(message.chat.id, welcome_text, parse_mode='Markdown')
                      
+@bot.message_handler(commands=['test_open'])
+def test_open_positions(message):
+    """Command test untuk cek fungsi open positions"""
+    try:
+        print("DEBUG: test_open_positions dipanggil")
+        
+        # Coba ambil data langsung
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        if DATABASE_URL:
+            cursor.execute("SELECT * FROM open_trades")
+        else:
+            cursor.execute("SELECT * FROM open_trades")
+            
+        rows = cursor.fetchall()
+        conn.close()
+        
+        if not rows:
+            bot.reply_to(message, "📭 *Tabel open_trades kosong*", parse_mode='Markdown')
+            return
+            
+        # Kirim raw data
+        text = "🔍 *RAW DATA OPEN_TRADES:*\n━━━━━━━━━━━━━━━━━━━━━\n"
+        for row in rows:
+            text += f"`{row}`\n"
+            
+        # Coba panggil fungsi get_open_trades_dict
+        dict_data = get_open_trades_dict()
+        text += f"\n📊 *Dictionary result:*\n`{dict_data}`"
+        
+        bot.reply_to(message, text, parse_mode='Markdown')
+        
+    except Exception as e:
+        bot.reply_to(message, f"❌ Error: `{str(e)}`", parse_mode='Markdown')
+
 @bot.message_handler(commands=['statistik', 'stats'])
 def send_statistics(message):
     """Handler Telegram untuk merespons perintah /statistik."""
@@ -699,21 +737,25 @@ def debug_open_positions(message):
 @bot.message_handler(func=lambda msg: True)
 def handle_reply_keyboard(message):
     text = message.text
+    print(f"DEBUG: Keyboard clicked: {text}")  # Log untuk debug
+    
     if text == "🔍 Pantauan Koin":
         bot.send_message(message.chat.id, "📂 *Silakan pilih kategori koin:*", parse_mode='Markdown', reply_markup=pairs_category_keyboard())
     elif text == "🎯 Setup Aktif (/pola)":
         send_active_patterns(message)
     elif text == "📊 Posisi Open":
+        print("DEBUG: Memproses Posisi Open")  # Log
         try:
             send_open_positions(message)
         except Exception as e:
+            print(f"❌ Error di handler Posisi Open: {e}")  # Log
+            import traceback
+            traceback.print_exc()
             bot.reply_to(
                 message,
                 f"❌ *Error saat menampilkan posisi:*\n`{str(e)}`",
                 parse_mode='Markdown'
             )
-            import traceback
-            traceback.print_exc()
     elif text == "📜 Histori Trade":
         send_trade_history(message)
     elif text == "🤖 Status Sistem":
@@ -736,13 +778,18 @@ def send_active_patterns(message):
 def send_open_positions(message):
     """Menampilkan semua posisi yang sedang open"""
     try:
+        print("DEBUG: send_open_positions dipanggil")  # Log 1
+        
         # Kirim pesan loading
         loading_msg = bot.send_message(message.chat.id, "⏳ _Mengambil data posisi..._", parse_mode='Markdown')
+        print("DEBUG: Pesan loading terkirim")  # Log 2
         
         # Ambil data dari database
         open_trades = get_open_trades_dict()
+        print(f"DEBUG: open_trades = {open_trades}")  # Log 3
         
         if not open_trades:
+            print("DEBUG: open_trades kosong")  # Log 4
             bot.edit_message_text(
                 "📭 *Tidak ada posisi trading yang aktif saat ini.*",
                 chat_id=message.chat.id,
@@ -751,29 +798,37 @@ def send_open_positions(message):
             )
             return
             
+        print(f"DEBUG: Memproses {len(open_trades)} posisi")  # Log 5
+        
         # Mulai buat teks
         text = "📊 *DAFTAR POSISI YANG SEDANG OPEN:*\n━━━━━━━━━━━━━━━━━━━━━\n"
         has_data = False
+        error_count = 0
         
         for symbol, data in open_trades.items():
             try:
+                print(f"DEBUG: Processing {symbol}")  # Log 6
                 coin = symbol.replace('-USDT-SWAP', '')
                 tipe = data.get('type', 'UNKNOWN')
                 entry_price = float(data.get('entry', 0))
                 sl_price = float(data.get('sl', 0))
                 tp_price = float(data.get('tp', 0))
                 
+                print(f"DEBUG: {symbol} - entry={entry_price}, sl={sl_price}, tp={tp_price}")  # Log 7
+                
                 # Validasi data
                 if entry_price == 0 or sl_price == 0 or tp_price == 0:
                     print(f"⚠️ Data tidak lengkap untuk {symbol}: {data}")
+                    error_count += 1
                     continue
                 
-                # Ambil harga terkini dengan error handling yang lebih baik
-                current_price = entry_price  # default ke entry price
+                # Ambil harga terkini
+                current_price = entry_price
                 try:
                     ticker_data = safe_fetch_ticker(symbol)
                     if ticker_data and 'price' in ticker_data:
                         current_price = ticker_data['price']
+                        print(f"DEBUG: {symbol} current price = {current_price}")  # Log 8
                 except Exception as e:
                     print(f"⚠️ Gagal fetch ticker {symbol}: {e}")
 
@@ -808,21 +863,25 @@ def send_open_positions(message):
                 print(f"❌ Error processing {symbol}: {e}")
                 import traceback
                 traceback.print_exc()
+                error_count += 1
                 continue
         
         # Hapus pesan loading
         try:
             bot.delete_message(message.chat.id, loading_msg.message_id)
-        except:
-            pass
+            print("DEBUG: Pesan loading dihapus")  # Log 9
+        except Exception as e:
+            print(f"DEBUG: Gagal hapus loading message: {e}")
         
         # Kirim hasil
         if has_data:
+            print("DEBUG: Mengirim hasil dengan data")  # Log 10
             bot.send_message(message.chat.id, text, parse_mode='Markdown')
         else:
+            print(f"DEBUG: Tidak ada data valid, error_count={error_count}")  # Log 11
             bot.send_message(
                 message.chat.id,
-                "❌ *Tidak ada data posisi yang valid untuk ditampilkan.*\nGunakan /debug_db untuk cek isi database.",
+                f"❌ *Tidak ada data posisi yang valid untuk ditampilkan.*\nTotal posisi: {len(open_trades)}, Error: {error_count}\nGunakan /debug_db untuk cek isi database.",
                 parse_mode='Markdown'
             )
             
@@ -834,7 +893,7 @@ def send_open_positions(message):
             message,
             f"❌ *Gagal menampilkan posisi open.*\nDetail: `{str(e)}`",
             parse_mode='Markdown'
-        )
+                )
 
 def send_trade_history(message):
     history = get_recent_history(10)
