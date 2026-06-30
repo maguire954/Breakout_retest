@@ -584,40 +584,32 @@ def send_active_patterns(message):
     bot.send_message(message.chat.id, text, parse_mode='Markdown')
 
 def send_open_positions(message):
-    """Membaca posisi aktif langsung dari database PostgreSQL/SQLite dengan proteksi trading live."""
-    # Kirim pesan loading agar pengguna tahu bot sedang bekerja membaca harga market OKX
-    loading_msg = bot.send_message(message.chat.id, "⏳ _Mengambil data posisi dan harga pasar OKX..._", parse_mode='Markdown')
+    loading_msg = bot.send_message(message.chat.id, "⏳ _Mengambil data posisi..._", parse_mode='Markdown')
     
     try:
-        # Ambil dictionary posisi dari database open_trades Anda
         open_trades = get_open_trades_dict()
         
-        # Jika database benar-benar kosong murni, hapus loading dan beri info terformat
         if not open_trades:
             try: bot.delete_message(message.chat.id, loading_msg.message_id)
             except: pass
-            bot.send_message(message.chat.id, "📭 *Tidak ada posisi trading yang aktif (OPEN) saat ini di database.*", parse_mode='Markdown')
+            bot.send_message(message.chat.id, "📭 *Tidak ada posisi trading yang aktif saat ini.*", parse_mode='Markdown')
             return
 
         text = "📊 *DAFTAR POSISI YANG SEDANG OPEN:*\n━━━━━━━━━━━━━━━━━━━━━\n"
         
         for symbol, data in open_trades.items():
-            # Standardisasi tampilan nama koin agar bersih di Telegram (Misal: BTC-USDT-SWAP -> BTC)
             coin = symbol.replace('-USDT-SWAP', '').replace('/USDT:USDT', '').replace(':USDT', '')
-            tipe = data['type']
-            entry_price = float(data['entry'])
+            tipe = data.get('type', 'UNKNOWN')
+            entry_price = float(data.get('entry', 0.0))
             
-            # Ambil harga live market dari OKX Swap lewat CCXT
             current_price = entry_price
             try:
                 ticker = exchange.fetch_ticker(symbol)
                 if ticker and 'last' in ticker: 
                     current_price = float(ticker['last'])
-            except Exception as ticker_err:
-                print(f"⚠️ Gagal mengambil harga live untuk {symbol}: {ticker_err}")
-                # Tetap gunakan entry_price sebagai fallback agar bot tidak crash murni
+            except: 
+                pass
 
-            # Kalkulasi profit/loss mengambang (Floating PnL) secara matematis
             if str(tipe).upper() in ['LONG', 'BUY', 'IN_LONG']:
                 pnl_nominal = current_price - entry_price
                 pnl_percent = (pnl_nominal / entry_price * 100) if entry_price > 0 else 0
@@ -627,33 +619,28 @@ def send_open_positions(message):
                 pnl_percent = (pnl_nominal / entry_price * 100) if entry_price > 0 else 0
                 tipe_emoji = "🔴 SHORT"
 
-            # Menggunakan blok format diff Telegram agar warna hijau (+) dan merah (-) terlihat kontras
-            pnl_status = "```diff\n"
-            if pnl_nominal >= 0:
-                pnl_status += f"+ Floating Profit: +{pnl_percent:.2f}%\n"
-            else:
-                pnl_status += f"- Floating Loss: {pnl_percent:.2f}%\n"
-            pnl_status += "```"
+            pnl_text = f"+ {pnl_percent:.2f}% (Profit)" if pnl_nominal >= 0 else f"{pnl_percent:.2f}% (Loss)"
 
             text += (
                 f"• *{coin}* ({tipe_emoji})\n"
                 f"  📥 Entry: `{entry_price:.4f}`\n"
                 f"  ⚡ Current: `{current_price:.4f}`\n"
-                f"  🛑 SL: `{float(data['sl']):.4f}` | 🎯 TP: `{float(data['tp']):.4f}`\n"
-                f"{pnl_status}\n━━━━━━━━━━━━━━━━━━━━━\n"
+                f"  🛑 SL: `{float(data.get('sl', 0)):.4f}` | 🎯 TP: `{float(data.get('tp', 0)):.4f}`\n"
+                f"  💸 PnL: *{pnl_text}*\n"
+                f"━━━━━━━━━━━━━━━━━━━━━\n"
             )
             
-        # Hapus loading message sebelum mengirimkan list data final
         try: bot.delete_message(message.chat.id, loading_msg.message_id)
         except: pass
         
         bot.send_message(message.chat.id, text, parse_mode='Markdown')
 
     except Exception as e:
-        print(f"❌ Error fatal pada send_open_positions: {str(e)}")
+        print(f"Error send_open_positions: {e}")
         try: bot.delete_message(message.chat.id, loading_msg.message_id)
         except: pass
-        bot.send_message(message.chat.id, f"❌ *Gagal memuat posisi open.*\nDetail Error: `{str(e)}`", parse_mode='Markdown')
+        # Mengirim sebagai teks biasa (tanpa Markdown) agar aman dari karakter aneh
+        bot.send_message(message.chat.id, f"Gagal memuat posisi open. Sistem mendeteksi error internal.")
 
 def send_trade_history(message):
     history = get_recent_history(10)
@@ -724,7 +711,7 @@ def scan_breakout_retest(symbol):
         # Monitoring Jika Berstatus LONG
         if pair_states[symbol]['status'] == 'IN_LONG':
             sl_level, tp_level = pair_states[symbol]['sl'], pair_states[symbol]['tp']
-            entry_p = open_trades[symbol]['entry'] if symbol in open_trades else current_close
+            entry_p = open_trades.get(symbol, {}).get('entry', current_close)
             
             if current_low <= sl_level:
                 pnl_pct = ((sl_level - entry_p) / entry_p) * 100
