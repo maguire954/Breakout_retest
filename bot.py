@@ -248,7 +248,7 @@ def insert_trade_history(symbol, tipe, entry, exit_price, result, closed_at):
         print(f"❌ Gagal menyimpan trade history ke DB: {str(e)}")
 
 def get_open_trades_dict():
-    """Mengembalikan dictionary posisi open dari database"""
+    """Mengembalikan dictionary posisi open dari database dengan normalisasi symbol"""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -274,6 +274,29 @@ def get_open_trades_dict():
                     tp = float(row[4]) if row[4] is not None else 0.0
                     waktu = str(row[5]) if row[5] is not None else ''
                     
+                    # Normalisasi symbol
+                    if symbol:
+                        # Konversi dari berbagai format ke BTC-USDT-SWAP
+                        if '/USDT:USDT' in symbol:
+                            symbol = symbol.replace('/USDT:USDT', '-USDT-SWAP')
+                        elif '/USDT' in symbol:
+                            symbol = symbol.replace('/USDT', '-USDT-SWAP')
+                        elif not symbol.endswith('-SWAP') and 'USDT' in symbol:
+                            if '/' in symbol:
+                                parts = symbol.split('/')
+                                if len(parts) == 2:
+                                    symbol = f"{parts[0]}-USDT-SWAP"
+                            elif '-' in symbol:
+                                # Misal: BTC-USDT -> BTC-USDT-SWAP
+                                if not symbol.endswith('-SWAP'):
+                                    symbol = f"{symbol}-SWAP"
+                            else:
+                                # Misal: BTCUSDT -> BTC-USDT-SWAP
+                                if 'USDT' in symbol:
+                                    base = symbol.replace('USDT', '')
+                                    if base:
+                                        symbol = f"{base}-USDT-SWAP"
+                    
                     if symbol and entry > 0 and sl > 0 and tp > 0:
                         trades[symbol] = {
                             'type': tipe,
@@ -282,6 +305,7 @@ def get_open_trades_dict():
                             'tp': tp,
                             'time': waktu
                         }
+                        print(f"DEBUG: Added {symbol} to trades")  # Log
             except Exception as e:
                 print(f"Error processing row {row}: {e}")
                 continue
@@ -448,8 +472,26 @@ def safe_fetch_ticker(symbol):
         if not symbol:
             return None
             
+        # Pastikan symbol dalam format yang benar
+        # Jika symbol menggunakan format BTC-USDT-SWAP, biarkan saja
+        # Tapi jika ada format lain, konversi ke format yang benar
+        if '/USDT:USDT' in symbol:
+            # Konversi dari ETH/USDT:USDT ke ETH-USDT-SWAP
+            symbol = symbol.replace('/USDT:USDT', '-USDT-SWAP')
+        elif 'USDT' in symbol and not symbol.endswith('-SWAP'):
+            # Tambahkan -SWAP jika belum ada
+            if '/' in symbol:
+                parts = symbol.split('/')
+                if len(parts) == 2:
+                    symbol = f"{parts[0]}-USDT-SWAP"
+            else:
+                symbol = f"{symbol}-USDT-SWAP"
+        
+        print(f"DEBUG: Fetching ticker for {symbol}")  # Log untuk debug
+        
         ticker = exchange.fetch_ticker(symbol)
         if not ticker or not isinstance(ticker, dict):
+            print(f"⚠️ Ticker response not valid for {symbol}")
             return None
             
         # Ambil harga dengan prioritas
@@ -464,6 +506,7 @@ def safe_fetch_ticker(symbol):
             price = float(ticker['ask'])
             
         if price is None or price <= 0:
+            print(f"⚠️ No valid price found for {symbol}")
             return None
             
         return {'price': price, 'data': ticker}
@@ -778,18 +821,18 @@ def send_active_patterns(message):
 def send_open_positions(message):
     """Menampilkan semua posisi yang sedang open"""
     try:
-        print("DEBUG: send_open_positions dipanggil")  # Log 1
+        print("DEBUG: send_open_positions dipanggil")
         
         # Kirim pesan loading
         loading_msg = bot.send_message(message.chat.id, "⏳ _Mengambil data posisi..._", parse_mode='Markdown')
-        print("DEBUG: Pesan loading terkirim")  # Log 2
+        print("DEBUG: Pesan loading terkirim")
         
         # Ambil data dari database
         open_trades = get_open_trades_dict()
-        print(f"DEBUG: open_trades = {open_trades}")  # Log 3
+        print(f"DEBUG: open_trades = {open_trades}")
         
         if not open_trades:
-            print("DEBUG: open_trades kosong")  # Log 4
+            print("DEBUG: open_trades kosong")
             bot.edit_message_text(
                 "📭 *Tidak ada posisi trading yang aktif saat ini.*",
                 chat_id=message.chat.id,
@@ -798,7 +841,7 @@ def send_open_positions(message):
             )
             return
             
-        print(f"DEBUG: Memproses {len(open_trades)} posisi")  # Log 5
+        print(f"DEBUG: Memproses {len(open_trades)} posisi")
         
         # Mulai buat teks
         text = "📊 *DAFTAR POSISI YANG SEDANG OPEN:*\n━━━━━━━━━━━━━━━━━━━━━\n"
@@ -807,14 +850,32 @@ def send_open_positions(message):
         
         for symbol, data in open_trades.items():
             try:
-                print(f"DEBUG: Processing {symbol}")  # Log 6
+                print(f"DEBUG: Processing {symbol}")
+                
+                # Validasi symbol
+                if not symbol:
+                    print(f"⚠️ Symbol kosong untuk data: {data}")
+                    error_count += 1
+                    continue
+                
+                # Pastikan symbol dalam format yang benar
+                if '/USDT:USDT' in symbol:
+                    symbol = symbol.replace('/USDT:USDT', '-USDT-SWAP')
+                elif not symbol.endswith('-SWAP') and 'USDT' in symbol:
+                    if '/' in symbol:
+                        parts = symbol.split('/')
+                        if len(parts) == 2:
+                            symbol = f"{parts[0]}-USDT-SWAP"
+                    else:
+                        symbol = f"{symbol}-USDT-SWAP"
+                
                 coin = symbol.replace('-USDT-SWAP', '')
                 tipe = data.get('type', 'UNKNOWN')
                 entry_price = float(data.get('entry', 0))
                 sl_price = float(data.get('sl', 0))
                 tp_price = float(data.get('tp', 0))
                 
-                print(f"DEBUG: {symbol} - entry={entry_price}, sl={sl_price}, tp={tp_price}")  # Log 7
+                print(f"DEBUG: {symbol} - entry={entry_price}, sl={sl_price}, tp={tp_price}")
                 
                 # Validasi data
                 if entry_price == 0 or sl_price == 0 or tp_price == 0:
@@ -828,7 +889,7 @@ def send_open_positions(message):
                     ticker_data = safe_fetch_ticker(symbol)
                     if ticker_data and 'price' in ticker_data:
                         current_price = ticker_data['price']
-                        print(f"DEBUG: {symbol} current price = {current_price}")  # Log 8
+                        print(f"DEBUG: {symbol} current price = {current_price}")
                 except Exception as e:
                     print(f"⚠️ Gagal fetch ticker {symbol}: {e}")
 
@@ -869,16 +930,16 @@ def send_open_positions(message):
         # Hapus pesan loading
         try:
             bot.delete_message(message.chat.id, loading_msg.message_id)
-            print("DEBUG: Pesan loading dihapus")  # Log 9
+            print("DEBUG: Pesan loading dihapus")
         except Exception as e:
             print(f"DEBUG: Gagal hapus loading message: {e}")
         
         # Kirim hasil
         if has_data:
-            print("DEBUG: Mengirim hasil dengan data")  # Log 10
+            print("DEBUG: Mengirim hasil dengan data")
             bot.send_message(message.chat.id, text, parse_mode='Markdown')
         else:
-            print(f"DEBUG: Tidak ada data valid, error_count={error_count}")  # Log 11
+            print(f"DEBUG: Tidak ada data valid, error_count={error_count}")
             bot.send_message(
                 message.chat.id,
                 f"❌ *Tidak ada data posisi yang valid untuk ditampilkan.*\nTotal posisi: {len(open_trades)}, Error: {error_count}\nGunakan /debug_db untuk cek isi database.",
@@ -893,7 +954,7 @@ def send_open_positions(message):
             message,
             f"❌ *Gagal menampilkan posisi open.*\nDetail: `{str(e)}`",
             parse_mode='Markdown'
-                )
+        )
 
 def send_trade_history(message):
     history = get_recent_history(10)
