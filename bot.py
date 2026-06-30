@@ -584,52 +584,98 @@ def send_active_patterns(message):
     bot.send_message(message.chat.id, text, parse_mode='Markdown')
 
 def send_open_positions(message):
-    open_trades = get_open_trades_dict()
-    if not open_trades:
-        bot.send_message(message.chat.id, "📭 *Tidak ada posisi trading yang aktif saat ini.*", parse_mode='Markdown')
-        return
-        
+    """Membaca posisi aktif secara cerdas dari open_trades maupun trade_history fallback."""
+    # Kirim status loading agar user tahu bot sedang bekerja
     loading_msg = bot.send_message(message.chat.id, "⏳ _Mengambil harga pasar terkini..._", parse_mode='Markdown')
-    text = "📊 *DAFTAR POSISI YANG SEDANG OPEN:*\n━━━━━━━━━━━━━━━━━━━━━\n"
     
-    for symbol, data in open_trades.items():
-        coin = symbol.replace('-USDT-SWAP', '')
-        tipe = data['type']
-        entry_price = data['entry']
+    try:
+        # 1. Ambil data dari tabel open_trades (Struktur Baru)
+        open_trades = get_open_trades_dict()
         
-        current_price = entry_price
+        # 2. Fallback: Ambil data dari trade_history yang result-nya 'OPEN' (Struktur Lama)
+        conn = get_db_connection()
+        cursor = conn.cursor()
         try:
-            ticker = exchange.fetch_ticker(symbol)
-            if ticker and 'last' in ticker: current_price = float(ticker['last'])
-        except: pass
+            if DATABASE_URL:
+                cursor.execute("SELECT symbol, type, entry, stop_loss, take_profit FROM trade_history WHERE result ILIKE '%OPEN%';")
+            else:
+                cursor.execute("SELECT symbol, type, entry, stop_loss, take_profit FROM trade_history WHERE result LIKE '%OPEN%';")
+            rows = cursor.fetchall()
+            for row in rows:
+                sym, tipe, entry, sl, tp = row
+                if sym not in open_trades:
+                    open_trades[sym] = {
+                        'type': tipe,
+                        'entry': float(entry) if entry else 0.0,
+                        'sl': float(sl) if sl else 0.0,
+                        'tp': float(tp) if tp else 0.0,
+                        'time': '-'
+                    }
+        except Exception as db_err:
+            print(f"ℹ️ Info: Kolom lama trade_history tidak terdeteksi atau berbeda ({db_err}), menggunakan data open_trades saja.")
+        finally:
+            conn.close()
 
-        if tipe == 'LONG':
-            pnl_nominal = current_price - entry_price
-            pnl_percent = (pnl_nominal / entry_price) * 100
-            tipe_emoji = "🟢 LONG"
-        else:
-            pnl_nominal = entry_price - current_price
-            pnl_percent = (pnl_nominal / entry_price) * 100
-            tipe_emoji = "🔴 SHORT"
+        # Jika setelah digabung tetap kosong, kirim pesan info terformat
+        if not open_trades:
+            try: bot.delete_message(message.chat.id, loading_msg.message_id)
+            except: pass
+            bot.send_message(message.chat.id, "📭 *Tidak ada posisi trading yang aktif saat ini di database.*", parse_mode='Markdown')
+            return
 
-        pnl_status = "```diff\n"
-        if pnl_nominal >= 0:
-            pnl_status += "+ Floating Profit: +" + "{:.2f}".format(pnl_percent) + "%\n"
-        else:
-            pnl_status += "- Floating Loss: " + "{:.2f}".format(pnl_percent) + "%\n"
-        pnl_status += "```"
-
-        text += (
-            f"• *{coin}* ({tipe_emoji})\n"
-            f"  📥 Entry: `{entry_price:.4f}`\n"
-            f"  ⚡ Current: `{current_price:.4f}`\n"
-            f"  🛑 SL: `{data['sl']:.4f}` | 🎯 TP: `{data['tp']:.4f}`\n"
-            f"{pnl_status}\n━━━━━━━━━━━━━━━━━━━━━\n"
-        )
+        text = "📊 *DAFTAR POSISI YANG SEDANG OPEN:*\n━━━━━━━━━━━━━━━━━━━━━\n"
         
-    try: bot.delete_message(message.chat.id, loading_msg.message_id)
-    except: pass
-    bot.send_message(message.chat.id, text, parse_mode='Markdown')
+        for symbol, data in open_trades.items():
+            # Standardisasi tampilan nama koin agar bersih
+            coin = symbol.replace('-USDT-SWAP', '').replace('/USDT:USDT', '').replace(':USDT', '')
+            tipe = data['type']
+            entry_price = data['entry']
+            
+            current_price = entry_price
+            try:
+                # Ambil harga live dari OKX swap markets
+                ticker = exchange.fetch_ticker(symbol if '-SWAP' in symbol else f"{coin}-USDT-SWAP")
+                if ticker and 'last' in ticker: 
+                    current_price = float(ticker['last'])
+            except: 
+                pass
+
+            # Kalkulasi profit/loss mengambang (Floating PnL)
+            if str(tipe).upper() in ['LONG', 'BUY']:
+                pnl_nominal = current_price - entry_price
+                pnl_percent = (pnl_nominal / entry_price * 100) if entry_price > 0 else 0
+                tipe_emoji = "🟢 LONG"
+            else:
+                pnl_nominal = entry_price - current_price
+                pnl_percent = (pnl_nominal / entry_price * 100) if entry_price > 0 else 0
+                tipe_emoji = "🔴 SHORT"
+
+            pnl_status = "```diff\n"
+            if pnl_nominal >= 0:
+                pnl_status += f"+ Floating Profit: +{pnl_percent:.2f}%\n"
+            else:
+                pnl_status += f"- Floating Loss: {pnl_percent:.2f}%\n"
+            pnl_status += "```"
+
+            text += (
+                f"• *{coin}* ({tipe_emoji})\n"
+                f"  📥 Entry: `{entry_price:.4f}`\n"
+                f"  ⚡ Current: `{current_price:.4f}`\n"
+                f"  🛑 SL: `{data['sl']:.4f}` | 🎯 TP: `{data['tp']:.4f}`\n"
+                f"{pnl_status}\n━━━━━━━━━━━━━━━━━━━━━\n"
+            )
+            
+        # Hapus loading message sebelum mengirim data final
+        try: bot.delete_message(message.chat.id, loading_msg.message_id)
+        except: pass
+        
+        bot.send_message(message.chat.id, text, parse_mode='Markdown')
+
+    except Exception as e:
+        print(f"❌ Error pada send_open_positions: {str(e)}")
+        try: bot.delete_message(message.chat.id, loading_msg.message_id)
+        except: pass
+        bot.send_message(message.chat.id, f"❌ *Gagal memuat posisi open.*\nDetail: `{str(e)}`", parse_mode='Markdown')
 
 def send_trade_history(message):
     history = get_recent_history(10)
