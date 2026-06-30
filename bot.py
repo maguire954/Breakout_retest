@@ -583,8 +583,8 @@ def send_active_patterns(message):
         text += f"• *{symbol.replace('-USDT-SWAP','')}*: {emoji} | Level Key: `{level}`\n"
     bot.send_message(message.chat.id, text, parse_mode='Markdown')
 
-def send_open_positions(message):
-    """Membaca posisi aktif secara cerdas dari open_trades maupun trade_history fallback."""
+def send_open_positions(bot, message):
+    """Membaca posisi aktif secara cerdas dari open_trades maupun trade_history fallback (Fix Parameter)."""
     # Kirim status loading agar user tahu bot sedang bekerja
     loading_msg = bot.send_message(message.chat.id, "⏳ _Mengambil harga pasar terkini..._", parse_mode='Markdown')
     
