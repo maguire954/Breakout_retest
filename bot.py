@@ -381,18 +381,20 @@ def calculate_atr(candles, period=14):
     Mengembalikan 0.0 jika data tidak cukup.
     """
     if not candles or len(candles) < period + 1:
-        return 0.0  # <-- Return float, bukan None
+        return 0.0
     
     true_ranges = []
     for i in range(1, len(candles)):
         try:
+            if len(candles[i]) < 5 or len(candles[i-1]) < 5:
+                continue
             high = candles[i][2]
             low = candles[i][3]
             prev_close = candles[i-1][4]
             tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
             true_ranges.append(tr)
         except Exception as e:
-            print(f"Error calculate ATR: {e}")
+            print(f"Error calculating ATR: {e}")
             continue
     
     if len(true_ranges) < period:
@@ -768,31 +770,34 @@ def handle_category_selection(call):
 def scan_breakout_retest(symbol):
     global pair_states
     try:
+        # Validasi awal
         if not symbol:
             return
-
-    try:
-        candles = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME_LIVE, limit=100)
-    except Exception as e:
-        print(f"Gagal fetch data untuk {symbol}: {e}")
-        return
-
+            
+        # Ambil data dengan error handling
+        try:
+            candles = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME_LIVE, limit=100)
+        except Exception as e:
+            print(f"Gagal fetch data untuk {symbol}: {e}")
+            return
+            
         if not candles or len(candles) < CANDLE_COUNT:
             print(f"Data tidak cukup untuk {symbol}: {len(candles)} candles")
             return
-            
+
+        # Pastikan semua data candle valid
         for candle in candles:
             if not candle or len(candle) < 6:
                 print(f"Data candle tidak valid untuk {symbol}")
                 return
-        
-        open_trades = get_open_trades_dict()
-        candles = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME_LIVE, limit=100)
-        if len(candles) < CANDLE_COUNT: return
 
-        current_candle, prev_candle = candles[-1], candles[-2]
-        current_close, current_low, current_high, prev_close = current_candle[4], current_candle[3], current_candle[2], prev_candle[4]
+        current_candle = candles[-1]
+        prev_candle = candles[-2]
+        current_close = current_candle[4]
+        current_low = current_candle[3]
+        current_high = current_candle[2]
         current_open = current_candle[1]
+        prev_close = prev_candle[4]
 
         if symbol not in pair_states:
             pair_states[symbol] = {'status': 'NONE', 'level': 0.0, 'sl': 0.0, 'tp': 0.0}
@@ -801,8 +806,10 @@ def scan_breakout_retest(symbol):
 
         # Monitoring Jika Berstatus LONG
         if pair_states[symbol]['status'] == 'IN_LONG':
-            sl_level, tp_level = pair_states[symbol]['sl'], pair_states[symbol]['tp']
-            entry_p = open_trades.get(symbol, {}).get('entry', current_close)
+            sl_level = pair_states[symbol]['sl']
+            tp_level = pair_states[symbol]['tp']
+            open_trades = get_open_trades_dict()
+            entry_p = open_trades[symbol]['entry'] if symbol in open_trades else current_close
             
             if current_low <= sl_level:
                 pnl_pct = ((sl_level - entry_p) / entry_p) * 100
@@ -820,12 +827,15 @@ def scan_breakout_retest(symbol):
                     delete_open_trade(symbol)
                 pair_states[symbol] = {'status': 'NONE', 'level': 0.0, 'sl': 0.0, 'tp': 0.0}
                 return
-            else: return
+            else:
+                return
 
         # Monitoring Jika Berstatus SHORT
         if pair_states[symbol]['status'] == 'IN_SHORT':
-            sl_level, tp_level = pair_states[symbol]['sl'], pair_states[symbol]['tp']
-            entry_p = open_trades.get(symbol, {}).get('entry', current_close)
+            sl_level = pair_states[symbol]['sl']
+            tp_level = pair_states[symbol]['tp']
+            open_trades = get_open_trades_dict()
+            entry_p = open_trades[symbol]['entry'] if symbol in open_trades else current_close
             
             if current_high >= sl_level:
                 pnl_pct = ((entry_p - sl_level) / entry_p) * 100
@@ -843,19 +853,29 @@ def scan_breakout_retest(symbol):
                     delete_open_trade(symbol)
                 pair_states[symbol] = {'status': 'NONE', 'level': 0.0, 'sl': 0.0, 'tp': 0.0}
                 return
-            else: return
+            else:
+                return
 
         # Analisis Sinyal Teknis (Confirmed Breakout & Retest)
-        macro_candles = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME_MACRO, limit=205)
-        macro_closes = [c[4] for c in macro_candles]
-        ema200_macro = calculate_ema(macro_closes, period=200)
+        try:
+            macro_candles = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME_MACRO, limit=205)
+            macro_closes = [c[4] for c in macro_candles]
+            ema200_macro = calculate_ema(macro_closes, period=200)
+        except Exception as e:
+            print(f"Error getting macro data for {symbol}: {e}")
+            return
 
         historical_candles = candles[-52:-2]
-        resistance, support = max([c[2] for c in historical_candles]), min([c[3] for c in historical_candles])
+        if not historical_candles:
+            return
+            
+        resistance = max([c[2] for c in historical_candles])
+        support = min([c[3] for c in historical_candles])
         avg_volume = sum([c[5] for c in historical_candles]) / len(historical_candles)
         volume_valid = prev_candle[5] > (avg_volume * VOLUME_MULTIPLIER)
         current_rsi = calculate_rsi([c[4] for c in candles], period=14)
 
+        # BULLISH BREAKOUT
         if prev_close > resistance and volume_valid and current_close > ema200_macro and current_rsi < 70:
             if pair_states[symbol]['status'] != 'BREAKOUT_BULLISH':
                 pair_states[symbol] = {'status': 'BREAKOUT_BULLISH', 'level': resistance, 'sl': support, 'tp': 0.0}
@@ -871,10 +891,11 @@ def scan_breakout_retest(symbol):
             rejection_confirmed = current_close > current_open and lower_wick > (body_size * 1.2)
             
             if retest_touched and retest_held and rejection_confirmed:
-                invalidation_long = pair_states[symbol]['sl']  # support level = invalidasi LONG
+                invalidation_long = pair_states[symbol]['sl']
                 stop_loss, sl_method = get_atr_sl(candles, invalidation_long, 'LONG')
                 risk = current_close - stop_loss
-                if risk <= 0: risk = current_close * 0.005
+                if risk <= 0:
+                    risk = current_close * 0.005
                 take_profit = current_close + (risk * 2)
                 
                 pair_states[symbol] = {'status': 'IN_LONG', 'level': target_res, 'sl': stop_loss, 'tp': take_profit}
@@ -885,8 +906,10 @@ def scan_breakout_retest(symbol):
                     atr_info = f"ATR14={atr_val:.4f}"
                 else:
                     atr_info = "ATR=N/A (gunakan flat)"
+                    
                 bot.send_message(TELEGRAM_CHAT_ID, f"🎯 *RETEST SUCCESS (ENTRY LONG)*\n\nPair: `{symbol.replace('-USDT-SWAP', '')}`\n📥 Entry: `{current_close:.4f}`\n🛑 SL: `{stop_loss:.4f}` ({sl_method}, {atr_info})\n🎯 TP: `{take_profit:.4f}`", parse_mode='Markdown')
 
+        # BEARISH BREAKDOWN
         elif prev_close < support and volume_valid and current_close < ema200_macro and current_rsi > 30:
             if pair_states[symbol]['status'] != 'BREAKOUT_BEARISH':
                 pair_states[symbol] = {'status': 'BREAKOUT_BEARISH', 'level': support, 'sl': resistance, 'tp': 0.0}
@@ -902,10 +925,11 @@ def scan_breakout_retest(symbol):
             rejection_confirmed = current_close < current_open and upper_wick > (body_size * 1.2)
             
             if retest_touched and retest_held and rejection_confirmed:
-                invalidation_short = pair_states[symbol]['sl']  # resistance level = invalidasi SHORT
+                invalidation_short = pair_states[symbol]['sl']
                 stop_loss, sl_method = get_atr_sl(candles, invalidation_short, 'SHORT')
                 risk = stop_loss - current_close
-                if risk <= 0: risk = current_close * 0.005
+                if risk <= 0:
+                    risk = current_close * 0.005
                 take_profit = current_close - (risk * 2)
                 
                 pair_states[symbol] = {'status': 'IN_SHORT', 'level': target_sup, 'sl': stop_loss, 'tp': take_profit}
@@ -916,20 +940,25 @@ def scan_breakout_retest(symbol):
                     atr_info = f"ATR14={atr_val:.4f}"
                 else:
                     atr_info = "ATR=N/A (gunakan flat)"
+                    
                 bot.send_message(TELEGRAM_CHAT_ID, f"🎯 *RETEST SUCCESS (ENTRY SHORT)*\n\nPair: `{symbol.replace('-USDT-SWAP', '')}`\n📥 Entry: `{current_close:.4f}`\n🛑 SL: `{stop_loss:.4f}` ({sl_method}, {atr_info})\n🎯 TP: `{take_profit:.4f}`", parse_mode='Markdown')
 
+        # Reset jika breakout gagal
         if pair_states[symbol]['status'] == 'BREAKOUT_BULLISH' and current_close < target_res * 0.995:
             pair_states[symbol] = {'status': 'NONE', 'level': 0.0, 'sl': 0.0, 'tp': 0.0}
         elif pair_states[symbol]['status'] == 'BREAKOUT_BEARISH' and current_close > target_sup * 1.005:
             pair_states[symbol] = {'status': 'NONE', 'level': 0.0, 'sl': 0.0, 'tp': 0.0}
 
     except Exception as e:
+        # Log error dengan detail
         print(f"Error scan {symbol}: {str(e)}")
         import traceback
         traceback.print_exc()
         
+        # Reset state jika terjadi error (kecuali dalam posisi)
         if symbol in pair_states:
-            if pair_states[symbol]['status'] not in ['IN_LONG'], ['IN_SHORT']: pair_states[symbol] = {'status': 'NONE', 'level': 0.0, 'sl': 0.0, 'tp': 0.0}
+            if pair_states[symbol]['status'] not in ['IN_LONG', 'IN_SHORT']:
+                pair_states[symbol] = {'status': 'NONE', 'level': 0.0, 'sl': 0.0, 'tp': 0.0}
 
 def main():
     print("Memulai aplikasi...")
