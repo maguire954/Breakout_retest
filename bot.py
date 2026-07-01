@@ -248,12 +248,11 @@ def insert_trade_history(symbol, tipe, entry, exit_price, result, closed_at):
         print(f"❌ Gagal menyimpan trade history ke DB: {str(e)}")
 
 def get_open_trades_dict():
-    """Mengembalikan dictionary posisi open dari database dengan normalisasi symbol"""
+    """Mengembalikan dictionary posisi open dari database"""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        # Query sesuai tipe database
         if DATABASE_URL:
             cursor.execute("SELECT symbol, type, entry, sl, tp, time FROM open_trades")
         else:
@@ -265,56 +264,40 @@ def get_open_trades_dict():
         trades = {}
         for row in rows:
             try:
-                # Pastikan row memiliki 6 elemen
                 if len(row) >= 6:
-                    # Ambil data dengan aman
-                    raw_symbol = row[0] if row[0] is not None else ''
+                    raw_symbol = str(row[0]) if row[0] is not None else ''
                     tipe = str(row[1]) if row[1] is not None else 'UNKNOWN'
                     entry = float(row[2]) if row[2] is not None else 0.0
                     sl = float(row[3]) if row[3] is not None else 0.0
                     tp = float(row[4]) if row[4] is not None else 0.0
                     waktu = str(row[5]) if row[5] is not None else ''
                     
-                    # Validasi symbol
-                    if not raw_symbol:
-                        print(f"⚠️ Symbol kosong untuk data: {row}")
+                    if not raw_symbol or entry <= 0 or sl <= 0 or tp <= 0:
                         continue
+                    
+                    # Normalisasi symbol - PASTIKAN dalam format BTC-USDT-SWAP
+                    symbol = raw_symbol.strip()
                     
                     # Bersihkan symbol
-                    symbol = str(raw_symbol).strip()
-                    
-                    # Normalisasi symbol ke format OKX
-                    if '/USDT:USDT' in symbol:
-                        symbol = symbol.replace('/USDT:USDT', '-USDT-SWAP')
-                    elif '/USDT' in symbol:
-                        symbol = symbol.replace('/USDT', '-USDT-SWAP')
-                    elif not symbol.endswith('-SWAP') and 'USDT' in symbol:
-                        if '/' in symbol:
-                            parts = symbol.split('/')
-                            if len(parts) == 2:
-                                base = parts[0].strip()
-                                if base:
-                                    symbol = f"{base}-USDT-SWAP"
-                        elif '-' in symbol:
-                            if not symbol.endswith('-SWAP'):
-                                symbol = f"{symbol}-SWAP"
-                        else:
-                            # Misal: BTCUSDT -> BTC-USDT-SWAP
-                            if 'USDT' in symbol:
-                                base = symbol.replace('USDT', '')
-                                if base:
-                                    symbol = f"{base}-USDT-SWAP"
-                    
-                    # Validasi akhir symbol
-                    if not symbol or len(symbol) < 3:
-                        print(f"⚠️ Symbol tidak valid setelah normalisasi: {raw_symbol} -> {symbol}")
-                        continue
-                    
-                    # Pastikan format akhir benar
-                    if not symbol.endswith('-SWAP'):
+                    if '/' in symbol:
+                        parts = symbol.split('/')
+                        if len(parts) >= 2:
+                            base = parts[0].strip()
+                            if base:
+                                symbol = f"{base}-USDT-SWAP"
+                    elif '-USDT' in symbol and not symbol.endswith('-SWAP'):
                         symbol = f"{symbol}-SWAP"
+                    elif 'USDT' in symbol and '-' not in symbol:
+                        base = symbol.replace('USDT', '').strip()
+                        if base:
+                            symbol = f"{base}-USDT-SWAP"
+                        else:
+                            symbol = f"{symbol}-USDT-SWAP"
+                    elif not symbol.endswith('-SWAP'):
+                        symbol = f"{symbol}-USDT-SWAP"
                     
-                    if entry > 0 and sl > 0 and tp > 0:
+                    # Validasi akhir
+                    if symbol and len(symbol) > 3:
                         trades[symbol] = {
                             'type': tipe,
                             'entry': entry,
@@ -322,18 +305,17 @@ def get_open_trades_dict():
                             'tp': tp,
                             'time': waktu
                         }
-                        print(f"✅ Added to trades: {symbol} ({tipe})")
+                        print(f"✅ Added: {symbol} ({tipe})")
+                        
             except Exception as e:
-                print(f"❌ Error processing row {row}: {e}")
-                import traceback
-                traceback.print_exc()
+                print(f"Error processing row: {e}")
                 continue
                 
-        print(f"✅ get_open_trades_dict: Menemukan {len(trades)} posisi valid")
+        print(f"✅ Total positions: {len(trades)}")
         return trades
         
     except Exception as e:
-        print(f"❌ Gagal membaca open trades: {str(e)}")
+        print(f"❌ Error: {e}")
         import traceback
         traceback.print_exc()
         return {}
@@ -365,21 +347,61 @@ def get_recent_history(limit=10):
 # =======================================================
 
 print("Menghubungi OKX API...")
+
+# Inisialisasi exchange dengan lebih baik
+exchange = ccxt.okx({
+    'options': {
+        'defaultType': 'swap',
+        'adjustForTimeDifference': True,  # Tambahkan ini
+    },
+    'enableRateLimit': True,
+    'timeout': 30000,  # Timeout 30 detik
+})
+
+# Load markets dengan retry
+max_retries = 3
+for attempt in range(max_retries):
+    try:
+        print(f"🔄 Mencoba load markets (attempt {attempt + 1}/{max_retries})...")
+        exchange.load_markets()
+        print(f"✅ Markets berhasil di-load! Total markets: {len(exchange.markets)}")
+        break
+    except Exception as e:
+        print(f"❌ Gagal load markets attempt {attempt + 1}: {e}")
+        if attempt < max_retries - 1:
+            print("⏳ Menunggu 3 detik sebelum retry...")
+            time.sleep(3)
+        else:
+            print("❌ Gagal load markets setelah 3 percobaan. Menggunakan fallback...")
+
+# Ambil daftar pair yang valid
 try:
-    exchange.load_markets()
-    futures_markets = [
-        market for market in exchange.markets.values() 
-        if market['swap'] and market['linear'] and market['settle'] == 'USDT' and market['active']
-    ]
-    futures_markets.sort(
-        key=lambda x: float(x['info'].get('vol24h', 0)) if 'info' in x else 0, 
-        reverse=True
-    )
-    active_pairs = [market['symbol'] for market in futures_markets[:50]]
-    if active_pairs:
-        print(f"🔥 Sukses mengunci {len(active_pairs)} koin dengan VOLUME TERBESAR di OKX!")
+    if exchange.markets:
+        futures_markets = [
+            market for market in exchange.markets.values() 
+            if market.get('swap') and market.get('linear') and market.get('settle') == 'USDT' and market.get('active')
+        ]
+        futures_markets.sort(
+            key=lambda x: float(x['info'].get('vol24h', 0)) if 'info' in x else 0, 
+            reverse=True
+        )
+        active_pairs = [market['symbol'] for market in futures_markets[:50]]
+        if active_pairs:
+            print(f"🔥 Sukses mengunci {len(active_pairs)} koin dengan VOLUME TERBESAR di OKX!")
+        else:
+            print("⚠️ Tidak ada futures market ditemukan, menggunakan fallback...")
+            active_pairs = []
+    else:
+        print("⚠️ Markets kosong, menggunakan fallback...")
+        active_pairs = []
+        
 except Exception as e:
-    print(f"Gagal memuat pasar OKX: {e}. Menggunakan list fallback 50 koin...")
+    print(f"⚠️ Error mengambil markets: {e}")
+    active_pairs = []
+
+# Fallback pairs jika gagal
+if not active_pairs:
+    print("📋 Menggunakan fallback pairs...")
     active_pairs = [
         'BTC-USDT-SWAP', 'ETH-USDT-SWAP', 'SOL-USDT-SWAP', 'XRP-USDT-SWAP', 'ADA-USDT-SWAP',
         'AVAX-USDT-SWAP', 'DOT-USDT-SWAP', 'DOGE-USDT-SWAP', 'SHIB-USDT-SWAP', 'LINK-USDT-SWAP',
@@ -392,6 +414,7 @@ except Exception as e:
         'ANKR-USDT-SWAP', 'APE-USDT-SWAP', 'AXS-USDT-SWAP', 'BLUR-USDT-SWAP', 'COMP-USDT-SWAP',
         'CRV-USDT-SWAP', 'ENS-USDT-SWAP', 'EOS-USDT-SWAP', 'FLOW-USDT-SWAP', 'SAND-USDT-SWAP'
     ]
+    print(f"✅ Menggunakan {len(active_pairs)} fallback pairs")
 
 # --- MATH METRICS CALCULATORS ---
 def calculate_ema(prices, period=200):
@@ -485,122 +508,74 @@ def get_atr_sl(candles, invalidation, trade_type, atr_multiplier=1.5, fallback_p
 def safe_fetch_ticker(symbol):
     """
     Mengambil ticker dengan error handling yang aman
-    Mengembalikan dictionary dengan data atau None
     """
     try:
-        # Validasi awal
+        # Validasi exchange
+        if not exchange or not exchange.markets:
+            print("⚠️ Exchange belum siap")
+            return None
+            
+        # Validasi symbol
         if not symbol:
             print("⚠️ Symbol is None or empty")
             return None
             
-        # Pastikan symbol adalah string
         symbol = str(symbol).strip()
         if not symbol:
-            print("⚠️ Symbol is empty string")
             return None
             
-        # Normalisasi symbol untuk OKX
-        original_symbol = symbol
+        print(f"DEBUG: Fetching price for {symbol}")
         
-        # Jika symbol sudah dalam format BTC-USDT-SWAP, langsung gunakan
-        if symbol.endswith('-SWAP'):
-            pass  # Sudah benar
-        elif '/USDT:USDT' in symbol:
-            symbol = symbol.replace('/USDT:USDT', '-USDT-SWAP')
-        elif '/USDT' in symbol:
-            symbol = symbol.replace('/USDT', '-USDT-SWAP')
-        elif 'USDT' in symbol and '/' in symbol:
-            parts = symbol.split('/')
-            if len(parts) == 2 and parts[0]:
-                symbol = f"{parts[0].strip()}-USDT-SWAP"
-        elif 'USDT' in symbol and '-' in symbol:
-            if not symbol.endswith('-SWAP'):
-                symbol = f"{symbol}-SWAP"
-        else:
-            # Misal: BTCUSDT -> BTC-USDT-SWAP
-            if 'USDT' in symbol:
-                base = symbol.replace('USDT', '').strip()
-                if base:
-                    symbol = f"{base}-USDT-SWAP"
-                else:
-                    symbol = f"{symbol}-USDT-SWAP"
-            else:
-                symbol = f"{symbol}-USDT-SWAP"
-        
-        print(f"DEBUG: Fetching ticker for {symbol} (original: {original_symbol})")
-        
-        # Method 1: Coba fetch ticker langsung
+        # Method 1: Coba dengan fetch_ticker
         try:
-            ticker = exchange.fetch_ticker(symbol)
-            if ticker and isinstance(ticker, dict):
-                price = None
-                
-                # Coba berbagai field
-                for field in ['last', 'close', 'bid', 'ask']:
-                    if field in ticker and ticker[field] is not None:
-                        try:
-                            price = float(ticker[field])
-                            if price > 0:
-                                print(f"✅ Got price from '{field}': {price} for {symbol}")
-                                return {'price': price, 'data': ticker}
-                        except (ValueError, TypeError):
-                            continue
-                
-                # Coba di info
-                if 'info' in ticker and isinstance(ticker['info'], dict):
-                    for field in ['last', 'close', 'bid', 'ask']:
-                        if field in ticker['info'] and ticker['info'][field] is not None:
+            if symbol in exchange.markets:
+                ticker = exchange.fetch_ticker(symbol)
+                if ticker:
+                    # Coba ambil harga
+                    price = None
+                    for field in ['last', 'close']:
+                        if field in ticker and ticker[field] is not None:
                             try:
-                                price = float(ticker['info'][field])
+                                price = float(ticker[field])
                                 if price > 0:
-                                    print(f"✅ Got price from info['{field}']: {price} for {symbol}")
-                                    return {'price': price, 'data': ticker}
-                            except (ValueError, TypeError):
+                                    print(f"✅ Got price from '{field}': {price}")
+                                    return {'price': price}
+                            except:
                                 continue
+                    
+                    # Coba dari bid/ask
+                    if price is None:
+                        for field in ['bid', 'ask']:
+                            if field in ticker and ticker[field] is not None:
+                                try:
+                                    price = float(ticker[field])
+                                    if price > 0:
+                                        print(f"✅ Got price from '{field}': {price}")
+                                        return {'price': price}
+                                except:
+                                    continue
         except Exception as e:
-            print(f"⚠️ Ticker fetch failed for {symbol}: {e}")
+            print(f"⚠️ fetch_ticker error: {e}")
         
-        # Method 2: Coba fetch OHLCV (lebih reliable untuk OKX)
+        # Method 2: Coba fetch_ohlcv
         try:
             print(f"DEBUG: Trying OHLCV for {symbol}")
             ohlcv = exchange.fetch_ohlcv(symbol, timeframe='1m', limit=2)
             if ohlcv and len(ohlcv) > 0:
                 last_candle = ohlcv[-1]
                 if last_candle and len(last_candle) >= 5:
-                    price = float(last_candle[4])  # Close price
+                    price = float(last_candle[4])
                     if price > 0:
-                        print(f"✅ Got price from OHLCV: {price} for {symbol}")
-                        return {'price': price, 'data': {'source': 'ohlcv'}}
+                        print(f"✅ Got price from OHLCV: {price}")
+                        return {'price': price}
         except Exception as e:
-            print(f"⚠️ OHLCV fetch failed for {symbol}: {e}")
-        
-        # Method 3: Coba dengan format berbeda (tanpa -SWAP)
-        if symbol.endswith('-SWAP'):
-            alt_symbol = symbol.replace('-SWAP', '')
-            alt_symbol2 = symbol.replace('-USDT-SWAP', '/USDT')
-            
-            for alt in [alt_symbol, alt_symbol2]:
-                try:
-                    print(f"DEBUG: Trying alternative symbol {alt}")
-                    ticker = exchange.fetch_ticker(alt)
-                    if ticker and isinstance(ticker, dict):
-                        for field in ['last', 'close', 'bid', 'ask']:
-                            if field in ticker and ticker[field] is not None:
-                                try:
-                                    price = float(ticker[field])
-                                    if price > 0:
-                                        print(f"✅ Got price from alternative '{alt}': {price}")
-                                        return {'price': price, 'data': ticker}
-                                except (ValueError, TypeError):
-                                    continue
-                except Exception as e:
-                    print(f"⚠️ Alternative fetch failed for {alt}: {e}")
+            print(f"⚠️ fetch_ohlcv error: {e}")
         
         print(f"❌ No price found for {symbol}")
         return None
         
     except Exception as e:
-        print(f"⚠️ Error in safe_fetch_ticker for {symbol}: {e}")
+        print(f"❌ Error in safe_fetch_ticker: {e}")
         import traceback
         traceback.print_exc()
         return None
@@ -702,6 +677,49 @@ def test_open_positions(message):
         # Coba panggil fungsi get_open_trades_dict
         dict_data = get_open_trades_dict()
         text += f"\n📊 *Dictionary result:*\n`{dict_data}`"
+        
+        bot.reply_to(message, text, parse_mode='Markdown')
+        
+    except Exception as e:
+        bot.reply_to(message, f"❌ Error: `{str(e)}`", parse_mode='Markdown')
+
+@bot.message_handler(commands=['test_exchange'])
+def test_exchange_command(message):
+    """Test koneksi ke exchange"""
+    try:
+        text = "🔍 *TESTING EXCHANGE CONNECTION*\n━━━━━━━━━━━━━━━━━━━━━\n"
+        
+        # Cek markets
+        if exchange.markets:
+            text += f"✅ Markets loaded: {len(exchange.markets)}\n"
+            text += f"✅ Sample markets: {list(exchange.markets.keys())[:5]}\n\n"
+        else:
+            text += "❌ Markets NOT loaded!\n\n"
+        
+        # Coba fetch ticker untuk BTC
+        try:
+            text += "📊 *Testing BTC-USDT-SWAP:*\n"
+            ticker = exchange.fetch_ticker('BTC-USDT-SWAP')
+            if ticker:
+                text += f"  Last: {ticker.get('last', 'N/A')}\n"
+                text += f"  Bid: {ticker.get('bid', 'N/A')}\n"
+                text += f"  Ask: {ticker.get('ask', 'N/A')}\n"
+            else:
+                text += "  ❌ No ticker data\n"
+        except Exception as e:
+            text += f"  ❌ Error: {str(e)[:100]}\n"
+        
+        # Coba fetch OHLCV
+        try:
+            text += "\n📊 *Testing OHLCV:*\n"
+            ohlcv = exchange.fetch_ohlcv('BTC-USDT-SWAP', timeframe='1m', limit=2)
+            if ohlcv and len(ohlcv) > 0:
+                last = ohlcv[-1]
+                text += f"  Close: {last[4]}\n"
+            else:
+                text += "  ❌ No OHLCV data\n"
+        except Exception as e:
+            text += f"  ❌ Error: {str(e)[:100]}\n"
         
         bot.reply_to(message, text, parse_mode='Markdown')
         
