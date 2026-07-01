@@ -499,85 +499,108 @@ def safe_fetch_ticker(symbol):
             print("⚠️ Symbol is empty string")
             return None
             
-        # Pastikan symbol dalam format yang benar untuk OKX
+        # Normalisasi symbol untuk OKX
         original_symbol = symbol
         
-        # Normalisasi symbol
-        if '/USDT:USDT' in symbol:
+        # Jika symbol sudah dalam format BTC-USDT-SWAP, langsung gunakan
+        if symbol.endswith('-SWAP'):
+            pass  # Sudah benar
+        elif '/USDT:USDT' in symbol:
             symbol = symbol.replace('/USDT:USDT', '-USDT-SWAP')
         elif '/USDT' in symbol:
             symbol = symbol.replace('/USDT', '-USDT-SWAP')
-        elif not symbol.endswith('-SWAP') and 'USDT' in symbol:
-            if '/' in symbol:
-                parts = symbol.split('/')
-                if len(parts) == 2 and parts[0]:
-                    symbol = f"{parts[0].strip()}-USDT-SWAP"
-            elif '-' in symbol:
-                if not symbol.endswith('-SWAP'):
-                    symbol = f"{symbol}-SWAP"
+        elif 'USDT' in symbol and '/' in symbol:
+            parts = symbol.split('/')
+            if len(parts) == 2 and parts[0]:
+                symbol = f"{parts[0].strip()}-USDT-SWAP"
+        elif 'USDT' in symbol and '-' in symbol:
+            if not symbol.endswith('-SWAP'):
+                symbol = f"{symbol}-SWAP"
+        else:
+            # Misal: BTCUSDT -> BTC-USDT-SWAP
+            if 'USDT' in symbol:
+                base = symbol.replace('USDT', '').strip()
+                if base:
+                    symbol = f"{base}-USDT-SWAP"
+                else:
+                    symbol = f"{symbol}-USDT-SWAP"
             else:
-                # Misal: BTCUSDT -> BTC-USDT-SWAP
-                if 'USDT' in symbol:
-                    base = symbol.replace('USDT', '').strip()
-                    if base:
-                        symbol = f"{base}-USDT-SWAP"
+                symbol = f"{symbol}-USDT-SWAP"
         
-        # Pastikan symbol akhir valid
-        if not symbol or len(symbol) < 3:
-            print(f"⚠️ Symbol tidak valid setelah normalisasi: {original_symbol} -> {symbol}")
-            return None
-            
-        # Pastikan format akhir benar
-        if not symbol.endswith('-SWAP'):
-            symbol = f"{symbol}-SWAP"
-            
         print(f"DEBUG: Fetching ticker for {symbol} (original: {original_symbol})")
         
-        # Coba fetch ticker
-        ticker = exchange.fetch_ticker(symbol)
-        
-        if not ticker or not isinstance(ticker, dict):
-            print(f"⚠️ Ticker response not valid for {symbol}")
-            return None
-            
-        # Ambil harga dengan prioritas
-        price = None
+        # Method 1: Coba fetch ticker langsung
         try:
-            if 'last' in ticker and ticker['last'] is not None:
-                price = float(ticker['last'])
-                print(f"DEBUG: Using 'last' price: {price}")
-            elif 'close' in ticker and ticker['close'] is not None:
-                price = float(ticker['close'])
-                print(f"DEBUG: Using 'close' price: {price}")
-            elif 'bid' in ticker and ticker['bid'] is not None:
-                price = float(ticker['bid'])
-                print(f"DEBUG: Using 'bid' price: {price}")
-            elif 'ask' in ticker and ticker['ask'] is not None:
-                price = float(ticker['ask'])
-                print(f"DEBUG: Using 'ask' price: {price}")
-            else:
-                # Coba cari harga di info
+            ticker = exchange.fetch_ticker(symbol)
+            if ticker and isinstance(ticker, dict):
+                price = None
+                
+                # Coba berbagai field
+                for field in ['last', 'close', 'bid', 'ask']:
+                    if field in ticker and ticker[field] is not None:
+                        try:
+                            price = float(ticker[field])
+                            if price > 0:
+                                print(f"✅ Got price from '{field}': {price} for {symbol}")
+                                return {'price': price, 'data': ticker}
+                        except (ValueError, TypeError):
+                            continue
+                
+                # Coba di info
                 if 'info' in ticker and isinstance(ticker['info'], dict):
-                    if 'last' in ticker['info'] and ticker['info']['last'] is not None:
-                        price = float(ticker['info']['last'])
-                        print(f"DEBUG: Using info['last'] price: {price}")
-                    elif 'close' in ticker['info'] and ticker['info']['close'] is not None:
-                        price = float(ticker['info']['close'])
-                        print(f"DEBUG: Using info['close'] price: {price}")
-        except (ValueError, TypeError) as e:
-            print(f"⚠️ Error converting price: {e}")
-            return None
+                    for field in ['last', 'close', 'bid', 'ask']:
+                        if field in ticker['info'] and ticker['info'][field] is not None:
+                            try:
+                                price = float(ticker['info'][field])
+                                if price > 0:
+                                    print(f"✅ Got price from info['{field}']: {price} for {symbol}")
+                                    return {'price': price, 'data': ticker}
+                            except (ValueError, TypeError):
+                                continue
+        except Exception as e:
+            print(f"⚠️ Ticker fetch failed for {symbol}: {e}")
+        
+        # Method 2: Coba fetch OHLCV (lebih reliable untuk OKX)
+        try:
+            print(f"DEBUG: Trying OHLCV for {symbol}")
+            ohlcv = exchange.fetch_ohlcv(symbol, timeframe='1m', limit=2)
+            if ohlcv and len(ohlcv) > 0:
+                last_candle = ohlcv[-1]
+                if last_candle and len(last_candle) >= 5:
+                    price = float(last_candle[4])  # Close price
+                    if price > 0:
+                        print(f"✅ Got price from OHLCV: {price} for {symbol}")
+                        return {'price': price, 'data': {'source': 'ohlcv'}}
+        except Exception as e:
+            print(f"⚠️ OHLCV fetch failed for {symbol}: {e}")
+        
+        # Method 3: Coba dengan format berbeda (tanpa -SWAP)
+        if symbol.endswith('-SWAP'):
+            alt_symbol = symbol.replace('-SWAP', '')
+            alt_symbol2 = symbol.replace('-USDT-SWAP', '/USDT')
             
-        if price is None or price <= 0:
-            print(f"⚠️ No valid price found for {symbol}")
-            print(f"DEBUG: Ticker data: {ticker}")
-            return None
-            
-        print(f"✅ Price found for {symbol}: {price}")
-        return {'price': price, 'data': ticker}
+            for alt in [alt_symbol, alt_symbol2]:
+                try:
+                    print(f"DEBUG: Trying alternative symbol {alt}")
+                    ticker = exchange.fetch_ticker(alt)
+                    if ticker and isinstance(ticker, dict):
+                        for field in ['last', 'close', 'bid', 'ask']:
+                            if field in ticker and ticker[field] is not None:
+                                try:
+                                    price = float(ticker[field])
+                                    if price > 0:
+                                        print(f"✅ Got price from alternative '{alt}': {price}")
+                                        return {'price': price, 'data': ticker}
+                                except (ValueError, TypeError):
+                                    continue
+                except Exception as e:
+                    print(f"⚠️ Alternative fetch failed for {alt}: {e}")
+        
+        print(f"❌ No price found for {symbol}")
+        return None
         
     except Exception as e:
-        print(f"⚠️ Error fetching ticker {symbol}: {e}")
+        print(f"⚠️ Error in safe_fetch_ticker for {symbol}: {e}")
         import traceback
         traceback.print_exc()
         return None
@@ -726,6 +749,73 @@ def test_price_command(message):
             results.append(f"❌ Safe fetch error: {e}")
         
         bot.reply_to(message, "\n\n".join(results), parse_mode='Markdown')
+        
+    except Exception as e:
+        bot.reply_to(message, f"❌ Error: `{str(e)}`", parse_mode='Markdown')
+
+@bot.message_handler(commands=['test_price2'])
+def test_price2_command(message):
+    """Test harga dengan berbagai metode"""
+    try:
+        args = message.text.split()
+        if len(args) < 2:
+            bot.reply_to(message, "⚠️ Format: `/test_price2 <SYMBOL>`\nContoh: `/test_price2 BTC`", parse_mode='Markdown')
+            return
+            
+        coin = args[1].upper().strip()
+        symbols = [
+            f"{coin}-USDT-SWAP",
+            f"{coin}/USDT:USDT",
+            f"{coin}/USDT",
+            f"{coin}USDT"
+        ]
+        
+        results = []
+        results.append(f"🔍 *TESTING HARGA UNTUK {coin}*\n━━━━━━━━━━━━━━━━━━━━━\n")
+        
+        for sym in symbols:
+            try:
+                results.append(f"📊 *Symbol: {sym}*")
+                
+                # Method 1: Fetch ticker
+                try:
+                    ticker = exchange.fetch_ticker(sym)
+                    if ticker:
+                        price = None
+                        for field in ['last', 'close', 'bid', 'ask']:
+                            if field in ticker and ticker[field] is not None:
+                                price = float(ticker[field])
+                                break
+                        if price:
+                            results.append(f"  ✅ Ticker: `{price:.4f}`")
+                        else:
+                            results.append(f"  ❌ Ticker: No price found")
+                    else:
+                        results.append(f"  ❌ Ticker: No data")
+                except Exception as e:
+                    results.append(f"  ❌ Ticker error: {str(e)[:50]}")
+                
+                # Method 2: Fetch OHLCV
+                try:
+                    ohlcv = exchange.fetch_ohlcv(sym, timeframe='1m', limit=2)
+                    if ohlcv and len(ohlcv) > 0:
+                        last = ohlcv[-1]
+                        if last and len(last) >= 5:
+                            results.append(f"  ✅ OHLCV Close: `{last[4]:.4f}`")
+                        else:
+                            results.append(f"  ❌ OHLCV: Invalid data")
+                    else:
+                        results.append(f"  ❌ OHLCV: No data")
+                except Exception as e:
+                    results.append(f"  ❌ OHLCV error: {str(e)[:50]}")
+                
+                results.append("")
+                
+            except Exception as e:
+                results.append(f"❌ Error for {sym}: {str(e)[:50]}")
+                results.append("")
+        
+        bot.reply_to(message, "\n".join(results), parse_mode='Markdown')
         
     except Exception as e:
         bot.reply_to(message, f"❌ Error: `{str(e)}`", parse_mode='Markdown')
@@ -964,6 +1054,7 @@ def send_active_patterns(message):
 def send_open_positions(message):
     """Menampilkan semua posisi yang sedang open dengan split jika terlalu panjang"""
     try:
+        print("=" * 50)
         print("DEBUG: send_open_positions dipanggil")
         
         # Kirim pesan loading
@@ -997,6 +1088,9 @@ def send_open_positions(message):
         
         for symbol, data in open_trades.items():
             try:
+                print(f"\n{'='*30}")
+                print(f"DEBUG: Processing {symbol}")
+                
                 # Validasi symbol
                 if not symbol or not isinstance(symbol, str):
                     print(f"⚠️ Symbol tidak valid: {symbol}")
@@ -1010,13 +1104,13 @@ def send_open_positions(message):
                     error_count += 1
                     continue
                 
-                print(f"DEBUG: Processing {clean_symbol}")
-                
                 # Ambil data
                 tipe = data.get('type', 'UNKNOWN')
                 entry_price = float(data.get('entry', 0))
                 sl_price = float(data.get('sl', 0))
                 tp_price = float(data.get('tp', 0))
+                
+                print(f"DEBUG: {clean_symbol} - entry={entry_price}, sl={sl_price}, tp={tp_price}, type={tipe}")
                 
                 # Validasi data
                 if entry_price == 0 or sl_price == 0 or tp_price == 0:
@@ -1028,33 +1122,62 @@ def send_open_positions(message):
                 current_price = entry_price
                 price_found = False
                 
-                # Coba fetch ticker dengan symbol yang sudah dinormalisasi
+                print(f"DEBUG: Mencoba mengambil harga untuk {clean_symbol}")
+                
+                # Coba fetch ticker
                 try:
                     ticker_data = safe_fetch_ticker(clean_symbol)
-                    if ticker_data and isinstance(ticker_data, dict) and 'price' in ticker_data:
-                        current_price = float(ticker_data['price'])
-                        price_found = True
-                        print(f"DEBUG: {clean_symbol} current price = {current_price}")
+                    if ticker_data and isinstance(ticker_data, dict):
+                        if 'price' in ticker_data:
+                            current_price = float(ticker_data['price'])
+                            price_found = True
+                            print(f"✅ BERHASIL: {clean_symbol} current price = {current_price}")
+                        else:
+                            print(f"⚠️ Ticker data tidak memiliki 'price': {ticker_data}")
+                    else:
+                        print(f"⚠️ Ticker data kosong atau tidak valid: {ticker_data}")
                 except Exception as e:
-                    print(f"⚠️ Error fetching price for {clean_symbol}: {e}")
+                    print(f"❌ Error fetching price for {clean_symbol}: {e}")
+                    import traceback
+                    traceback.print_exc()
                 
-                # Jika gagal, coba dengan format lain
+                # Jika gagal, coba dengan exchange.fetch_ticker langsung (tanpa safe wrapper)
                 if not price_found:
-                    # Coba tanpa -SWAP
-                    if clean_symbol.endswith('-SWAP'):
-                        alt_symbol = clean_symbol.replace('-SWAP', '')
-                        try:
-                            ticker_data = safe_fetch_ticker(alt_symbol)
-                            if ticker_data and isinstance(ticker_data, dict) and 'price' in ticker_data:
-                                current_price = float(ticker_data['price'])
+                    try:
+                        print(f"DEBUG: Mencoba fetch_ticker langsung untuk {clean_symbol}")
+                        ticker = exchange.fetch_ticker(clean_symbol)
+                        if ticker:
+                            print(f"DEBUG: Ticker response: {ticker}")
+                            # Coba ambil harga
+                            if 'last' in ticker and ticker['last'] is not None:
+                                current_price = float(ticker['last'])
                                 price_found = True
-                                print(f"DEBUG: {alt_symbol} current price = {current_price}")
-                        except Exception as e:
-                            print(f"⚠️ Error fetching price for {alt_symbol}: {e}")
+                                print(f"✅ BERHASIL (direct): {clean_symbol} price = {current_price}")
+                            elif 'close' in ticker and ticker['close'] is not None:
+                                current_price = float(ticker['close'])
+                                price_found = True
+                                print(f"✅ BERHASIL (direct close): {clean_symbol} price = {current_price}")
+                    except Exception as e:
+                        print(f"❌ Direct fetch failed: {e}")
                 
-                # Jika masih gagal, pakai entry price
+                # Jika masih gagal, coba fetch OHLCV
                 if not price_found:
-                    print(f"⚠️ No price found for {clean_symbol}, using entry price: {entry_price}")
+                    try:
+                        print(f"DEBUG: Mencoba OHLCV untuk {clean_symbol}")
+                        ohlcv = exchange.fetch_ohlcv(clean_symbol, timeframe='1m', limit=2)
+                        if ohlcv and len(ohlcv) > 0:
+                            last_candle = ohlcv[-1]
+                            if last_candle and len(last_candle) >= 5:
+                                current_price = float(last_candle[4])
+                                price_found = True
+                                print(f"✅ BERHASIL (OHLCV): {clean_symbol} price = {current_price}")
+                    except Exception as e:
+                        print(f"❌ OHLCV fetch failed: {e}")
+                
+                # Jika semua gagal, pakai entry price
+                if not price_found:
+                    print(f"⚠️ SEMUA METODE GAGAL untuk {clean_symbol}, menggunakan entry price: {entry_price}")
+                    current_price = entry_price
 
                 # Hitung PnL
                 if tipe.upper() == 'LONG':
@@ -1065,6 +1188,8 @@ def send_open_positions(message):
                     pnl_nominal = entry_price - current_price
                     pnl_percent = (pnl_nominal / entry_price) * 100
                     tipe_emoji = "🔴 SHORT"
+
+                print(f"DEBUG: PnL for {clean_symbol}: {pnl_percent:.2f}% ({pnl_nominal:.4f})")
 
                 # Format status PnL
                 if pnl_nominal >= 0:
@@ -1105,7 +1230,7 @@ def send_open_positions(message):
         
         # Kirim semua pesan
         if has_data:
-            print(f"DEBUG: Mengirim {len(messages)} pesan dengan {pos_count} posisi")
+            print(f"\nDEBUG: Mengirim {len(messages)} pesan dengan {pos_count} posisi")
             for i, msg in enumerate(messages):
                 bot.send_message(message.chat.id, msg, parse_mode='Markdown')
         else:
@@ -1115,6 +1240,8 @@ def send_open_positions(message):
                 f"❌ *Tidak ada data posisi yang valid untuk ditampilkan.*\nTotal posisi: {len(open_trades)}, Error: {error_count}",
                 parse_mode='Markdown'
             )
+            
+        print("=" * 50)
             
     except Exception as e:
         print(f"❌ Error di send_open_positions: {str(e)}")
