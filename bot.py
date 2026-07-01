@@ -516,38 +516,79 @@ def send_welcome(message):
         "• 🤖 Status Sistem - Info bot",
         parse_mode='Markdown')
 
-@bot.message_handler(commands=['backtest'])
-def handle_backtest_command(message):
-    args = message.text.split()
-    if len(args) < 2:
-        bot.reply_to(message, "⚠️ Format: `/backtest <KOIN>` (Contoh: `/backtest BTC`)", parse_mode='Markdown')
-        return
-
-    coin_name = args[1].upper().strip()
-    symbol = f"{coin_name}-USDT-SWAP"
-    loading_msg = bot.reply_to(message, f"⏳ _Menghitung Winrate untuk {symbol}..._", parse_mode='Markdown')
-
+@bot.message_handler(commands=['backtest_tf'])
+def handle_backtest_tf_command(message):
+    """Backtest dengan timeframe yang dipilih (Fleksibel)"""
     try:
-        candles = fetch_ohlcv_from_okx(symbol, timeframe=TIMEFRAME_LIVE, limit=500)
-        
-        if not candles or len(candles) < 205:
-            bot.reply_to(message, f"❌ Data tidak mencukupi untuk `{symbol}` (Minimal 205 candle).", parse_mode='Markdown')
+        args = message.text.split()
+        if len(args) < 3:
+            bot.reply_to(message, 
+                "⚠️ *Format:* `/backtest_tf <KOIN> <TIMEFRAME>`\n\n"
+                "📌 *Contoh:*\n"
+                "`/backtest_tf BTC 1h`\n"
+                "`/backtest_tf PEPE 4h`\n"
+                "`/backtest_tf ETH 15m`\n\n"
+                "📊 *Timeframe yang tersedia:*\n"
+                "`1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d, 1w`",
+                parse_mode='Markdown'
+            )
             return
 
+        coin_name = args[1].upper().strip()
+        timeframe = args[2].lower().strip()
+        
+        # Validasi timeframe
+        valid_tf = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '12h', '1d', '1w']
+        if timeframe not in valid_tf:
+            bot.reply_to(message, 
+                f"❌ Timeframe `{timeframe}` tidak valid.\n"
+                f"Gunakan: `{', '.join(valid_tf)}`", 
+                parse_mode='Markdown'
+            )
+            return
+
+        symbol = f"{coin_name}-USDT-SWAP"
+        loading_msg = bot.reply_to(message, f"⏳ _Backtest {symbol} - Timeframe: {timeframe}..._", parse_mode='Markdown')
+
+        # Sesuaikan limit berdasarkan timeframe
+        if timeframe in ['1m', '3m', '5m']:
+            limit = 500
+        elif timeframe in ['15m', '30m']:
+            limit = 400
+        else:
+            limit = 300
+
+        candles = fetch_ohlcv_from_okx(symbol, timeframe=timeframe, limit=limit)
+        
+        if not candles or len(candles) < 50:
+            bot.edit_message_text(
+                f"❌ Data tidak mencukupi untuk `{symbol}` (Minimal 50 candle).",
+                chat_id=message.chat.id,
+                message_id=loading_msg.message_id,
+                parse_mode='Markdown'
+            )
+            return
+
+        # ========== BACKTEST ENGINE ==========
         total_trades, wins, losses = 0, 0, 0
         state = 'NONE'
         trigger_level, sl_level, tp_level = 0.0, 0.0, 0.0
-        trade_list = []  # Untuk menyimpan detail trade
+        trade_list = []
+        signal_list = []
 
-        for i in range(202, len(candles)):
+        # Mulai dari candle ke-50 untuk memastikan data cukup
+        start_idx = min(50, len(candles) // 4)
+        
+        for i in range(start_idx, len(candles)):
             current_candle = candles[i]
             prev_candle = candles[i-1]
             current_high, current_low, current_close = current_candle[2], current_candle[3], current_candle[4]
             current_open = current_candle[1]
             prev_close = prev_candle[4]
             
-            hist_candles = candles[i - CANDLE_COUNT - 2 : i - 1]
-            if not hist_candles: 
+            # Histori candle untuk support/resistance (30 candle terakhir)
+            hist_candles = candles[i - 30 : i - 1] if i >= 30 else candles[:i-1]
+            if not hist_candles or len(hist_candles) < 20:
                 continue
             
             resistance = max([c[2] for c in hist_candles])
@@ -556,39 +597,51 @@ def handle_backtest_command(message):
             avg_volume = sum([c[5] for c in hist_candles]) / len(hist_candles)
             breakout_volume = candles[i-1][5]
             
-            # === PARAMETER BACKTEST (LEBIH FLEKSIBEL) ===
-            # 1. Volume multiplier: 1.5x (standar)
-            volume_valid = breakout_volume > (avg_volume * 1.5)
+            # Parameter backtest (bisa disesuaikan)
+            vol_multiplier = 1.5  # Volume harus 1.5x dari rata-rata
+            volume_valid = breakout_volume > (avg_volume * vol_multiplier)
             
             local_closes = [c[4] for c in candles[:i]]
-            current_ema200_macro = calculate_ema(local_closes, period=200) 
+            current_ema = calculate_ema(local_closes, period=50)  # EMA 50
             current_rsi = calculate_rsi(local_closes, period=14)
 
-            if not current_ema200_macro or not current_rsi:
+            if not current_ema or not current_rsi:
                 continue
 
-            # === STATE MACHINE ===
+            # ========== STATE MACHINE ==========
             if state == 'NONE':
-                # BULLISH: RSI < 60 (tidak terlalu overbought)
-                if prev_close > resistance and volume_valid and current_close > current_ema200_macro and current_rsi < 60:
+                # BULLISH BREAKOUT
+                if prev_close > resistance and volume_valid and current_close > current_ema and current_rsi < 60:
                     state = 'BREAKOUT_BULLISH'
                     trigger_level = resistance
-                # BEARISH: RSI > 40 (tidak terlalu oversold)
-                elif prev_close < support and volume_valid and current_close < current_ema200_macro and current_rsi > 40:
+                    signal_list.append({
+                        'type': 'BULLISH',
+                        'level': resistance,
+                        'price': current_close,
+                        'time': i
+                    })
+                # BEARISH BREAKDOWN
+                elif prev_close < support and volume_valid and current_close < current_ema and current_rsi > 40:
                     state = 'BREAKOUT_BEARISH'
                     trigger_level = support
+                    signal_list.append({
+                        'type': 'BEARISH',
+                        'level': support,
+                        'price': current_close,
+                        'time': i
+                    })
 
             elif state == 'BREAKOUT_BULLISH':
                 body_size = abs(current_close - current_open)
                 lower_wick = min(current_open, current_close) - current_low
                 
-                retest_touched = current_low <= trigger_level * 1.005  # Lebih longgar
+                retest_touched = current_low <= trigger_level * 1.005
                 retest_held = current_close > trigger_level * 0.995
-                rejection_valid = current_close > current_open and lower_wick > (body_size * 1.0)  # Lebih longgar
+                rejection_valid = current_close > current_open and lower_wick > (body_size * 0.8)
                 
                 if retest_touched and retest_held and rejection_valid:
                     state = 'IN_LONG'
-                    sl_level = support
+                    sl_level = support * 0.998
                     risk = current_close - sl_level
                     if risk <= 0: 
                         risk = current_close * 0.005
@@ -598,22 +651,23 @@ def handle_backtest_command(message):
                         'entry': current_close,
                         'sl': sl_level,
                         'tp': tp_level,
-                        'type': 'LONG'
+                        'type': 'LONG',
+                        'time': i
                     })
-                elif current_close < trigger_level * 0.99:  # Lebih longgar
+                elif current_close < trigger_level * 0.99:
                     state = 'NONE'
 
             elif state == 'BREAKOUT_BEARISH':
                 body_size = abs(current_close - current_open)
                 upper_wick = current_high - max(current_open, current_close)
                 
-                retest_touched = current_high >= trigger_level * 0.995  # Lebih longgar
+                retest_touched = current_high >= trigger_level * 0.995
                 retest_held = current_close < trigger_level * 1.005
-                rejection_valid = current_close < current_open and upper_wick > (body_size * 1.0)  # Lebih longgar
+                rejection_valid = current_close < current_open and upper_wick > (body_size * 0.8)
                 
                 if retest_touched and retest_held and rejection_valid:
                     state = 'IN_SHORT'
-                    sl_level = resistance
+                    sl_level = resistance * 1.002
                     risk = sl_level - current_close
                     if risk <= 0: 
                         risk = current_close * 0.005
@@ -623,9 +677,10 @@ def handle_backtest_command(message):
                         'entry': current_close,
                         'sl': sl_level,
                         'tp': tp_level,
-                        'type': 'SHORT'
+                        'type': 'SHORT',
+                        'time': i
                     })
-                elif current_close > trigger_level * 1.01:  # Lebih longgar
+                elif current_close > trigger_level * 1.01:
                     state = 'NONE'
 
             elif state == 'IN_LONG':
@@ -644,54 +699,84 @@ def handle_backtest_command(message):
                     wins += 1
                     state = 'NONE'
 
+        # ========== HITUNG STATISTIK ==========
         winrate = (wins / total_trades * 100) if total_trades > 0 else 0.0
         
-        # === LAPORAN ===
+        # Hitung profit/loss detail
+        total_profit = 0
+        total_loss = 0
+        for trade in trade_list:
+            if trade['type'] == 'LONG':
+                pnl = ((trade['tp'] - trade['entry']) / trade['entry']) * 100
+            else:
+                pnl = ((trade['entry'] - trade['tp']) / trade['entry']) * 100
+            
+            if pnl > 0:
+                total_profit += pnl
+            else:
+                total_loss += abs(pnl)
+        
+        avg_profit = total_profit / wins if wins > 0 else 0
+        avg_loss = total_loss / losses if losses > 0 else 0
+        profit_factor = total_profit / total_loss if total_loss > 0 else 0
+
+        # ========== BUAT LAPORAN ==========
         if total_trades > 0:
             report_text = (
                 f"📊 *LAPORAN BACKTEST*\n"
                 f"━━━━━━━━━━━━━━━━━━━━━\n"
-                f"Aset: `{symbol}`\n"
-                f"Timeframe: `{TIMEFRAME_LIVE}`\n"
-                f"Periode: {len(candles)} candle\n\n"
-                f"📈 *Total Sinyal:* *{total_trades}*\n"
-                f"🟢 Win (TP): *{wins}*\n"
-                f"🔴 Loss (SL): *{losses}*\n"
+                f"🔹 *Aset:* `{symbol}`\n"
+                f"🔹 *Timeframe:* `{timeframe}`\n"
+                f"🔹 *Periode:* {len(candles)} candle\n"
                 f"━━━━━━━━━━━━━━━━━━━━━\n"
-                f"🎯 *WIN RATE: {winrate:.1f}%*\n\n"
+                f"📈 *Total Sinyal:* `{total_trades}`\n"
+                f"🟢 *Win (TP):* `{wins}`\n"
+                f"🔴 *Loss (SL):* `{losses}`\n"
+                f"━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🎯 *WIN RATE:* **{winrate:.1f}%**\n\n"
+                f"💰 *Rata-rata Profit:* `+{avg_profit:.2f}%`\n"
+                f"💰 *Rata-rata Loss:* `{avg_loss:.2f}%`\n"
+                f"📊 *Profit Factor:* `{profit_factor:.2f}`\n"
+                f"📈 *Net Profit:* `{total_profit - total_loss:+.2f}%`\n\n"
             )
             
-            # Tambahkan detail sinyal
+            # Tampilkan 5 sinyal terakhir
             if trade_list:
-                report_text += "📋 *Detail Sinyal:*\n"
-                for idx, trade in enumerate(trade_list[:10], 1):
+                report_text += "📋 *5 Sinyal Terakhir:*\n"
+                for idx, trade in enumerate(trade_list[-5:], 1):
+                    pnl_pct = ((trade['tp'] - trade['entry']) / trade['entry']) * 100 if trade['type'] == 'LONG' else ((trade['entry'] - trade['tp']) / trade['entry']) * 100
+                    emoji = "🟢" if pnl_pct > 0 else "🔴"
                     report_text += (
-                        f"{idx}. {trade['type']} | Entry: {trade['entry']:.2f} | "
-                        f"SL: {trade['sl']:.2f} | TP: {trade['tp']:.2f}\n"
+                        f"{idx}. {trade['type']} | Entry: `{trade['entry']:.4f}` | "
+                        f"SL: `{trade['sl']:.4f}` | TP: `{trade['tp']:.4f}` | {emoji} {pnl_pct:+.1f}%\n"
                     )
-                if len(trade_list) > 10:
-                    report_text += f"... dan {len(trade_list) - 10} sinyal lainnya\n"
             
-            # Tambahkan saran
-            if winrate < 30:
-                report_text += "\n⚠️ *Saran:* Winrate rendah. Perketat filter atau coba pair lain."
-            elif winrate < 50:
-                report_text += "\n📌 *Saran:* Winrate sedang. Bisa dioptimalkan dengan filter tambahan."
+            # Analisis dan saran
+            report_text += f"\n━━━━━━━━━━━━━━━━━━━━━\n"
+            if winrate >= 60:
+                report_text += "✅ *Analisis:* WINRATE SANGAT BAGUS! Lanjutkan strategi ini."
+            elif winrate >= 45:
+                report_text += "📌 *Analisis:* WINRATE CUKUP BAIK. Bisa dioptimalkan lagi."
+            elif winrate >= 30:
+                report_text += "⚠️ *Analisis:* WINRATE RENDAH. Perlu filter tambahan."
             else:
-                report_text += "\n✅ *Saran:* Winrate bagus! Lanjutkan strategi ini."
+                report_text += "❌ *Analisis:* WINRATE SANGAT RENDAH. Coba pair atau timeframe lain."
                 
         else:
             report_text = (
                 f"📊 *LAPORAN BACKTEST*\n"
                 f"━━━━━━━━━━━━━━━━━━━━━\n"
-                f"Aset: `{symbol}`\n"
-                f"Timeframe: `{TIMEFRAME_LIVE}`\n"
-                f"Total candle: {len(candles)}\n\n"
+                f"🔹 *Aset:* `{symbol}`\n"
+                f"🔹 *Timeframe:* `{timeframe}`\n"
+                f"🔹 *Total candle:* {len(candles)}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━\n"
                 f"❌ *Tidak ada sinyal valid ditemukan*\n\n"
                 f"💡 *Saran:*\n"
-                f"• Gunakan timeframe lebih besar (1h)\n"
-                f"• Coba pair lain dengan volatilitas tinggi\n"
-                f"• Periksa kondisi pasar (trend/ranging)"
+                f"• Coba timeframe lebih besar (1h, 4h)\n"
+                f"• Coba pair dengan volatilitas tinggi\n"
+                f"• Periksa apakah pasar sedang trending\n"
+                f"• Gunakan `/backtest_tf {coin_name} 1h`\n"
+                f"• Gunakan `/backtest_tf {coin_name} 4h`"
             )
         
         try: 
@@ -709,6 +794,32 @@ def handle_backtest_command(message):
         bot.reply_to(message, f"❌ *Error Backtest:* `{str(e)}`", parse_mode='Markdown')
         import traceback
         traceback.print_exc()
+
+@bot.message_handler(commands=['backtest_help'])
+def backtest_help_command(message):
+    """Help untuk command backtest"""
+    help_text = (
+        "📖 *PANDUAN BACKTEST*\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "📌 *Cara Penggunaan:*\n"
+        "`/backtest_tf <KOIN> <TIMEFRAME>`\n\n"
+        "📊 *Contoh:*\n"
+        "• `/backtest_tf BTC 1h` - Backtest BTC 1 jam\n"
+        "• `/backtest_tf PEPE 15m` - Backtest PEPE 15 menit\n"
+        "• `/backtest_tf ETH 4h` - Backtest ETH 4 jam\n\n"
+        "⏰ *Timeframe Tersedia:*\n"
+        "`1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d, 1w`\n\n"
+        "💡 *Tips:*\n"
+        "• Timeframe kecil (15m) = lebih banyak sinyal\n"
+        "• Timeframe besar (4h) = sinyal lebih akurat\n"
+        "• Coba berbagai pair untuk cari yang paling profit\n\n"
+        "📈 *Parameter Backtest:*\n"
+        "• Volume Multiplier: 1.5x\n"
+        "• Risk Reward: 2:1\n"
+        "• RSI Range: 40-60\n"
+        "• EMA 50 sebagai trend filter"
+    )
+    bot.reply_to(message, help_text, parse_mode='Markdown')
 
 @bot.message_handler(commands=['winrate'])
 def winrate_command(message):
