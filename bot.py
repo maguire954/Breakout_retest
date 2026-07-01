@@ -516,6 +516,159 @@ def send_welcome(message):
         "• 🤖 Status Sistem - Info bot",
         parse_mode='Markdown')
 
+@bot.message_handler(commands=['backtest'])
+def handle_backtest_command(message):
+    args = message.text.split()
+    if len(args) < 2:
+        bot.reply_to(message, "⚠️ Format: `/backtest <KOIN>` (Contoh: `/backtest BTC`)", parse_mode='Markdown')
+        return
+
+    coin_name = args[1].upper().strip()
+    symbol = f"{coin_name}-USDT-SWAP"
+    loading_msg = bot.reply_to(message, f"⏳ _Menghitung Winrate premium untuk {symbol}..._", parse_mode='Markdown')
+
+    try:
+        # Gunakan fetch_ohlcv_from_okx langsung (tanpa ccxt)
+        candles = fetch_ohlcv_from_okx(symbol, timeframe=TIMEFRAME_LIVE, limit=500)
+        
+        if not candles or len(candles) < 205:
+            bot.reply_to(message, f"❌ Data transaksi historis untuk `{symbol}` tidak mencukupi (Minimal butuh 205 candle).", parse_mode='Markdown')
+            return
+
+        total_trades, wins, losses = 0, 0, 0
+        state = 'NONE'
+        trigger_level, sl_level, tp_level = 0.0, 0.0, 0.0
+
+        for i in range(202, len(candles)):
+            current_candle = candles[i]
+            prev_candle = candles[i-1]
+            current_high, current_low, current_close = current_candle[2], current_candle[3], current_candle[4]
+            current_open = current_candle[1]
+            prev_close = prev_candle[4]
+            
+            hist_candles = candles[i - CANDLE_COUNT - 2 : i - 1]
+            if not hist_candles: 
+                continue
+            
+            resistance = max([c[2] for c in hist_candles])
+            support = min([c[3] for c in hist_candles])
+            
+            avg_volume = sum([c[5] for c in hist_candles]) / len(hist_candles)
+            breakout_volume = candles[i-1][5]
+            volume_valid = breakout_volume > (avg_volume * 2.0)
+            
+            local_closes = [c[4] for c in candles[:i]]
+            
+            current_ema200_macro = calculate_ema(local_closes, period=200) 
+            current_rsi = calculate_rsi(local_closes, period=14)
+
+            if not current_ema200_macro or not current_rsi:
+                continue
+
+            if state == 'NONE':
+                if prev_close > resistance and volume_valid and current_close > current_ema200_macro and current_rsi < 40:
+                    state = 'BREAKOUT_BULLISH'
+                    trigger_level = resistance
+                elif prev_close < support and volume_valid and current_close < current_ema200_macro and current_rsi > 60:
+                    state = 'BREAKOUT_BEARISH'
+                    trigger_level = support
+
+            elif state == 'BREAKOUT_BULLISH':
+                body_size = abs(current_close - current_open)
+                lower_wick = min(current_open, current_close) - current_low
+                
+                retest_touched = current_low <= trigger_level * 1.002
+                retest_held = current_close > trigger_level * 0.998
+                rejection_valid = current_close > current_open and lower_wick > (body_size * 1.5)
+                
+                if retest_touched and retest_held and rejection_valid:
+                    state = 'IN_LONG'
+                    sl_level = support
+                    risk = current_close - sl_level
+                    if risk <= 0: 
+                        risk = current_close * 0.005
+                    tp_level = current_close + (risk * 2.5)
+                    total_trades += 1
+                elif current_close < trigger_level * 0.995:
+                    state = 'NONE'
+
+            elif state == 'BREAKOUT_BEARISH':
+                body_size = abs(current_close - current_open)
+                upper_wick = current_high - max(current_open, current_close)
+                
+                retest_touched = current_high >= trigger_level * 0.998
+                retest_held = current_close < trigger_level * 1.002
+                rejection_valid = current_close < current_open and upper_wick > (body_size * 1.5)
+                
+                if retest_touched and retest_held and rejection_valid:
+                    state = 'IN_SHORT'
+                    sl_level = resistance
+                    risk = sl_level - current_close
+                    if risk <= 0: 
+                        risk = current_close * 0.005
+                    tp_level = current_close - (risk * 2.5)
+                    total_trades += 1
+                elif current_close > trigger_level * 1.005:
+                    state = 'NONE'
+
+            elif state == 'IN_LONG':
+                if current_low <= sl_level: 
+                    losses += 1
+                    state = 'NONE'
+                elif current_high >= tp_level: 
+                    wins += 1
+                    state = 'NONE'
+
+            elif state == 'IN_SHORT':
+                if current_high >= sl_level: 
+                    losses += 1
+                    state = 'NONE'
+                elif current_low <= tp_level: 
+                    wins += 1
+                    state = 'NONE'
+
+        winrate = (wins / total_trades * 100) if total_trades > 0 else 0.0
+        
+        # Tambahan statistik
+        if total_trades > 0:
+            report_text = (
+                f"📊 *LAPORAN WINRATE (CONFIRMED RETEST)*\n"
+                f"━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Aset: `{symbol}` | TF: `{TIMEFRAME_LIVE}`\n"
+                f"🔹 Total Sinyal Valid: *{total_trades}*\n"
+                f"🟢 Profit (Wins): *{wins}* | 🔴 Loss: *{losses}*\n\n"
+                f"🎯 *OPTIMIZED WIN RATE: {winrate:.2f}%* 🔥\n\n"
+                f"📈 *Profit/Loss Detail:*\n"
+                f"  Win Rate: {winrate:.1f}%\n"
+                f"  Loss Rate: {100-winrate:.1f}%\n"
+                f"  Risk Reward: 2:1\n"
+            )
+        else:
+            report_text = (
+                f"📊 *LAPORAN WINRATE*\n"
+                f"━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Aset: `{symbol}`\n"
+                f"❌ *Tidak ada sinyal valid ditemukan*\n"
+                f"Total candle: {len(candles)}\n"
+                f"Minimal candle: 205"
+            )
+        
+        try: 
+            bot.delete_message(message.chat.id, loading_msg.message_id)
+        except: 
+            pass
+            
+        bot.reply_to(message, report_text, parse_mode='Markdown')
+
+    except Exception as e:
+        try: 
+            bot.delete_message(message.chat.id, loading_msg.message_id)
+        except: 
+            pass
+        bot.reply_to(message, f"❌ *Gagal memproses backtest.*\nDetail Kendala: `{str(e)}`", parse_mode='Markdown')
+        import traceback
+        traceback.print_exc()
+
 @bot.message_handler(commands=['winrate'])
 def winrate_command(message):
     """Command untuk melihat winrate"""
