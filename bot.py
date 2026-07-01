@@ -2,7 +2,6 @@ import os
 import time
 import threading
 import sqlite3
-import ccxt
 import telebot
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 import psycopg2
@@ -20,36 +19,30 @@ CANDLE_COUNT = 50
 VOLUME_MULTIPLIER = 1.5    
 DB_FILE = "trading_bot.db"
 
-# Otomatis deteksi koneksi PostgreSQL dari Railway
 DATABASE_URL = os.getenv("DATABASE_URL")
 # =======================================================
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
-exchange = ccxt.okx({'options': {'defaultType': 'swap'}, 'enableRateLimit': True})
 
 pair_states = {}
 active_pairs = []
 
 # =======================================================
-# 🗄️ DATABASE ENGINE ADAPTIF (POSTGRESQL & SQLITE)
+# 🗄️ DATABASE ENGINE
 # =======================================================
 
 def get_db_connection():
-    """Mengembalikan koneksi database yang sesuai (PostgreSQL untuk Railway, SQLite untuk lokal)."""
     if DATABASE_URL:
-        import psycopg2
         return psycopg2.connect(DATABASE_URL, sslmode='require')
     else:
         return sqlite3.connect(DB_FILE)
 
 def init_db():
-    """Membuat tabel database secara otomatis berdasarkan tipe database yang digunakan."""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
         
         if DATABASE_URL:
-            print("🐘 Mencoba menginisialisasi tabel di PostgreSQL Railway...")
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS open_trades (
                     symbol VARCHAR(50) PRIMARY KEY,
@@ -71,9 +64,7 @@ def init_db():
                     closed_at VARCHAR(20)
                 )
             ''')
-            print("🐘 Tabel PostgreSQL sukses diverifikasi dan dibuat!")
         else:
-            print("⚠️ DATABASE_URL tidak ditemukan! Menggunakan SQLite lokal...")
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS open_trades (
                     symbol TEXT PRIMARY KEY,
@@ -95,94 +86,52 @@ def init_db():
                     closed_at TEXT
                 )
             ''')
-            print("💾 Tabel SQLite sukses diverifikasi dan dibuat!")
-            
         conn.commit()
         conn.close()
+        print("✅ Database initialized")
     except Exception as e:
-        print(f"❌ ERROR INISIALISASI DATABASE: {str(e)}")
+        print(f"❌ DB Error: {e}")
 
-def hitung_statistik_performa():
-    """Mengambil data statistik dengan pencarian kata kunci fleksibel (ILIKE)"""
-    conn = get_db_connection()
-    if not conn:
-        return None
-        
+def get_open_trades_dict():
     try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("""
-                SELECT 
-                    COUNT(*) as total,
-                    COUNT(CASE WHEN result ILIKE '%PROFIT%' OR result ILIKE '%TP%' THEN 1 END) as wins,
-                    COUNT(CASE WHEN result ILIKE '%LOSS%' OR result ILIKE '%SL%' THEN 1 END) as losses,
-                    COUNT(CASE WHEN result ILIKE '%OPEN%' THEN 1 END) as opens
-                FROM trade_history;
-            """)
-            stats = cur.fetchone()
-            
-            if stats['total'] == 0:
-                return "📝 Belum ada data transaksi di database untuk dihitung."
-                
-            total_closed = stats['wins'] + stats['losses']
-            winrate = (stats['wins'] / total_closed * 100) if total_closed > 0 else 0
-            
-            cur.execute("""
-                SELECT symbol, COUNT(*) as qty,
-                COUNT(CASE WHEN result ILIKE '%PROFIT%' OR result ILIKE '%TP%' THEN 1 END) as coin_wins
-                FROM trade_history 
-                WHERE result NOT ILIKE '%OPEN%'
-                GROUP BY symbol 
-                ORDER BY qty DESC 
-                LIMIT 3;
-            """)
-            top_coins = cur.fetchall()
-            
-            laporan = (
-                f"📊 *DASHBOARD STATISTIK TRADING*\n"
-                f"────────────────────────\n"
-                f"📈 Total Sinyal Masuk  : *{stats['total']}*\n"
-                f"⏳ Posisi Sedang Aktif : *{stats['opens']}*\n"
-                f"✅ Transaksi Win (TP)  : *{stats['wins']}*\n"
-                f"❌ Transaksi Lose (SL) : *{stats['losses']}*\n"
-                f"────────────────────────\n"
-                f"🎯 *WIN RATE SYSTEM   : {winrate:.2f}%*\n"
-                f"────────────────────────\n"
-            )
-            
-            if top_coins:
-                laporan += "🪙 *PERFORMA PASAR TERAKTIF:*\n"
-                for coin in top_coins:
-                    laporan += f"• {coin['symbol']}: {coin['qty']} Trade (Win: {coin['coin_wins']})\n"
-            
-            return laporan
-            
-    except Exception as e:
-        print(f"⚠️ SQL Error Detail: {e}")
-        return "❌ Gagal memproses data statistik dari database."
-    finally:
-        conn.close()
-
-def load_saved_positions():
-    """Memulihkan data posisi monitoring berjalan dari database saat booting."""
-    try:
-        global pair_states
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT symbol, type, sl, tp FROM open_trades")
+        cursor.execute("SELECT symbol, type, entry, sl, tp, time FROM open_trades")
         rows = cursor.fetchall()
-        for row in rows:
-            symbol, tipe, sl, tp = row
-            pair_states[symbol] = {
-                'status': 'IN_LONG' if tipe == 'LONG' else 'IN_SHORT',
-                'level': 0.0, 
-                'sl': float(sl),
-                'tp': float(tp)
-            }
         conn.close()
-        if rows:
-            print(f"📦 Berhasil memulihkan {len(rows)} posisi aktif dari Database!")
+        
+        trades = {}
+        for row in rows:
+            if len(row) >= 6:
+                raw_symbol = str(row[0]) if row[0] is not None else ''
+                tipe = str(row[1]) if row[1] is not None else 'UNKNOWN'
+                entry = float(row[2]) if row[2] is not None else 0.0
+                sl = float(row[3]) if row[3] is not None else 0.0
+                tp = float(row[4]) if row[4] is not None else 0.0
+                waktu = str(row[5]) if row[5] is not None else ''
+                
+                if not raw_symbol or entry <= 0 or sl <= 0 or tp <= 0:
+                    continue
+                
+                symbol = raw_symbol.strip()
+                if '/' in symbol:
+                    parts = symbol.split('/')
+                    if len(parts) >= 2 and parts[0]:
+                        symbol = f"{parts[0].strip()}-USDT-SWAP"
+                elif '-USDT' in symbol and not symbol.endswith('-SWAP'):
+                    symbol = f"{symbol}-SWAP"
+                elif 'USDT' in symbol and '-' not in symbol:
+                    base = symbol.replace('USDT', '').strip()
+                    symbol = f"{base}-USDT-SWAP" if base else f"{symbol}-USDT-SWAP"
+                elif not symbol.endswith('-SWAP'):
+                    symbol = f"{symbol}-USDT-SWAP"
+                
+                if symbol and len(symbol) > 3:
+                    trades[symbol] = {'type': tipe, 'entry': entry, 'sl': sl, 'tp': tp, 'time': waktu}
+        return trades
     except Exception as e:
-        print(f"❌ Gagal memulihkan posisi dari database: {str(e)}")
+        print(f"❌ Error: {e}")
+        return {}
 
 def save_open_trade(symbol, tipe, entry, sl, tp, waktu):
     try:
@@ -203,7 +152,7 @@ def save_open_trade(symbol, tipe, entry, sl, tp, waktu):
         conn.commit()
         conn.close()
     except Exception as e:
-        print(f"❌ Gagal menyimpan open trade ke DB: {str(e)}")
+        print(f"❌ Save error: {e}")
 
 def delete_open_trade(symbol):
     try:
@@ -216,7 +165,7 @@ def delete_open_trade(symbol):
         conn.commit()
         conn.close()
     except Exception as e:
-        print(f"❌ Gagal menghapus open trade dari DB: {str(e)}")
+        print(f"❌ Delete error: {e}")
 
 def insert_trade_history(symbol, tipe, entry, exit_price, result, closed_at):
     try:
@@ -235,78 +184,7 @@ def insert_trade_history(symbol, tipe, entry, exit_price, result, closed_at):
         conn.commit()
         conn.close()
     except Exception as e:
-        print(f"❌ Gagal menyimpan trade history ke DB: {str(e)}")
-
-def get_open_trades_dict():
-    """Mengembalikan dictionary posisi open dari database"""
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        if DATABASE_URL:
-            cursor.execute("SELECT symbol, type, entry, sl, tp, time FROM open_trades")
-        else:
-            cursor.execute("SELECT symbol, type, entry, sl, tp, time FROM open_trades")
-            
-        rows = cursor.fetchall()
-        conn.close()
-        
-        trades = {}
-        for row in rows:
-            try:
-                if len(row) >= 6:
-                    raw_symbol = str(row[0]) if row[0] is not None else ''
-                    tipe = str(row[1]) if row[1] is not None else 'UNKNOWN'
-                    entry = float(row[2]) if row[2] is not None else 0.0
-                    sl = float(row[3]) if row[3] is not None else 0.0
-                    tp = float(row[4]) if row[4] is not None else 0.0
-                    waktu = str(row[5]) if row[5] is not None else ''
-                    
-                    if not raw_symbol or entry <= 0 or sl <= 0 or tp <= 0:
-                        continue
-                    
-                    symbol = raw_symbol.strip()
-                    
-                    # Normalisasi symbol ke format BTC-USDT-SWAP
-                    if '/' in symbol:
-                        parts = symbol.split('/')
-                        if len(parts) >= 2:
-                            base = parts[0].strip()
-                            if base:
-                                symbol = f"{base}-USDT-SWAP"
-                    elif '-USDT' in symbol and not symbol.endswith('-SWAP'):
-                        symbol = f"{symbol}-SWAP"
-                    elif 'USDT' in symbol and '-' not in symbol:
-                        base = symbol.replace('USDT', '').strip()
-                        if base:
-                            symbol = f"{base}-USDT-SWAP"
-                        else:
-                            symbol = f"{symbol}-USDT-SWAP"
-                    elif not symbol.endswith('-SWAP'):
-                        symbol = f"{symbol}-USDT-SWAP"
-                    
-                    if symbol and len(symbol) > 3:
-                        trades[symbol] = {
-                            'type': tipe,
-                            'entry': entry,
-                            'sl': sl,
-                            'tp': tp,
-                            'time': waktu
-                        }
-                        print(f"✅ Added: {symbol} ({tipe})")
-                        
-            except Exception as e:
-                print(f"Error processing row: {e}")
-                continue
-                
-        print(f"✅ Total positions: {len(trades)}")
-        return trades
-        
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        import traceback
-        traceback.print_exc()
-        return {}
+        print(f"❌ History error: {e}")
 
 def get_recent_history(limit=10):
     try:
@@ -318,39 +196,34 @@ def get_recent_history(limit=10):
             cursor.execute("SELECT symbol, type, entry, exit, result, closed_at FROM trade_history ORDER BY id DESC LIMIT ?", (limit,))
         rows = cursor.fetchall()
         conn.close()
-        
         history_list = []
         for row in rows:
             symbol, tipe, entry, exit_price, result, closed_at = row
             history_list.append({
-                'symbol': symbol, 'type': tipe, 'entry': float(entry), 'exit': float(exit_price), 'result': result, 'closed_at': closed_at
+                'symbol': symbol, 'type': tipe, 'entry': float(entry), 
+                'exit': float(exit_price), 'result': result, 'closed_at': closed_at
             })
         return history_list
     except Exception as e:
-        print(f"❌ Gagal membaca trade history dari DB: {str(e)}")
+        print(f"❌ History read error: {e}")
         return []
 
 # =======================================================
 # 📊 OKX API DIRECT FETCH (TANPA CCXT)
 # =======================================================
 
-def fetch_price_from_okx(symbol):
-    """
-    Mengambil harga langsung dari OKX API menggunakan requests
-    """
+def fetch_ohlcv_from_okx(symbol, timeframe='15m', limit=100):
+    """Fetch OHLCV data langsung dari OKX API"""
     try:
         if not symbol:
             return None
-            
+        
         symbol = str(symbol).strip()
         if not symbol:
             return None
         
-        print(f"DEBUG: Fetching price from OKX API for {symbol}")
-        
-        # Normalisasi symbol ke format OKX API
+        # Normalize symbol
         api_symbol = symbol
-        
         if api_symbol.endswith('-SWAP'):
             api_symbol = api_symbol.replace('-SWAP', '')
         elif '/' in api_symbol:
@@ -358,45 +231,87 @@ def fetch_price_from_okx(symbol):
             if len(parts) >= 2:
                 api_symbol = f"{parts[0].strip()}-{parts[1].strip().replace(':USDT', '')}"
         
-        print(f"DEBUG: API symbol: {api_symbol}")
+        # Map timeframe
+        bar_map = {
+            '1m': '1m', '3m': '3m', '5m': '5m', '15m': '15m', '30m': '30m',
+            '1h': '1H', '2h': '2H', '4h': '4H', '6h': '6H', '12h': '12H',
+            '1d': '1D', '1w': '1W', '1M': '1M'
+        }
+        bar = bar_map.get(timeframe, '15m')
         
-        # Method 1: Coba endpoint ticker
+        url = f"https://www.okx.com/api/v5/market/candles?instId={api_symbol}&bar={bar}&limit={limit}"
+        print(f"DEBUG: Fetching OHLCV: {url}")
+        
+        response = requests.get(url, timeout=15)
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('code') == '0' and data.get('data'):
+                candles = data['data']
+                # Convert to ccxt format: [timestamp, open, high, low, close, volume]
+                result = []
+                for candle in candles:
+                    if len(candle) >= 6:
+                        ts = int(candle[0])
+                        open_price = float(candle[1])
+                        high = float(candle[2])
+                        low = float(candle[3])
+                        close = float(candle[4])
+                        volume = float(candle[5])
+                        result.append([ts, open_price, high, low, close, volume])
+                # Reverse to get ascending order (oldest first)
+                result.reverse()
+                print(f"✅ Got {len(result)} candles for {symbol}")
+                return result
+        else:
+            print(f"⚠️ HTTP Error: {response.status_code}")
+            return None
+            
+    except Exception as e:
+        print(f"❌ fetch_ohlcv error: {e}")
+        return None
+
+def fetch_price_from_okx(symbol):
+    """Fetch current price from OKX API"""
+    try:
+        if not symbol:
+            return None
+        symbol = str(symbol).strip()
+        if not symbol:
+            return None
+        
+        api_symbol = symbol
+        if api_symbol.endswith('-SWAP'):
+            api_symbol = api_symbol.replace('-SWAP', '')
+        elif '/' in api_symbol:
+            parts = api_symbol.split('/')
+            if len(parts) >= 2:
+                api_symbol = f"{parts[0].strip()}-{parts[1].strip().replace(':USDT', '')}"
+        
+        # Try ticker endpoint
         try:
             url = f"https://www.okx.com/api/v5/market/ticker?instId={api_symbol}"
-            print(f"DEBUG: Requesting {url}")
-            
             response = requests.get(url, timeout=10)
             if response.status_code == 200:
                 data = response.json()
-                print(f"DEBUG: Response received")
-                
                 if data.get('code') == '0' and data.get('data'):
                     ticker_data = data['data'][0]
-                    price = None
-                    
                     for field in ['last', 'close', 'bidPx', 'askPx']:
                         if field in ticker_data and ticker_data[field]:
                             try:
                                 price = float(ticker_data[field])
                                 if price > 0:
-                                    print(f"✅ Got price from '{field}': {price}")
                                     return price
                             except:
                                 continue
-            else:
-                print(f"⚠️ HTTP Error: {response.status_code}")
         except Exception as e:
             print(f"⚠️ Ticker API error: {e}")
         
-        # Method 2: Coba endpoint OHLCV
+        # Try OHLCV endpoint
         try:
             url = f"https://www.okx.com/api/v5/market/candles?instId={api_symbol}&bar=1m&limit=2"
-            print(f"DEBUG: Requesting {url}")
-            
             response = requests.get(url, timeout=10)
             if response.status_code == 200:
                 data = response.json()
-                
                 if data.get('code') == '0' and data.get('data'):
                     candles = data['data']
                     if candles and len(candles) > 0:
@@ -405,154 +320,21 @@ def fetch_price_from_okx(symbol):
                             try:
                                 price = float(last_candle[4])
                                 if price > 0:
-                                    print(f"✅ Got price from OHLCV: {price}")
                                     return price
                             except:
                                 pass
-            else:
-                print(f"⚠️ OHLCV HTTP Error: {response.status_code}")
         except Exception as e:
             print(f"⚠️ OHLCV API error: {e}")
         
-        # Method 3: Coba dengan symbol asli (dengan -SWAP)
-        if not api_symbol.endswith('-SWAP'):
-            try:
-                alt_symbol = f"{api_symbol}-SWAP"
-                url = f"https://www.okx.com/api/v5/market/ticker?instId={alt_symbol}"
-                print(f"DEBUG: Trying alternative: {alt_symbol}")
-                
-                response = requests.get(url, timeout=10)
-                if response.status_code == 200:
-                    data = response.json()
-                    if data.get('code') == '0' and data.get('data'):
-                        ticker_data = data['data'][0]
-                        for field in ['last', 'close', 'bidPx', 'askPx']:
-                            if field in ticker_data and ticker_data[field]:
-                                try:
-                                    price = float(ticker_data[field])
-                                    if price > 0:
-                                        print(f"✅ Got price from alternative '{field}': {price}")
-                                        return price
-                                except:
-                                    continue
-            except Exception as e:
-                print(f"⚠️ Alternative API error: {e}")
-        
-        print(f"❌ No price found for {symbol}")
         return None
-        
     except Exception as e:
-        print(f"❌ Error in fetch_price_from_okx: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
-
-def safe_fetch_ticker(symbol):
-    """
-    Mengambil ticker dengan error handling yang aman
-    """
-    try:
-        if not symbol:
-            return None
-            
-        symbol = str(symbol).strip()
-        if not symbol:
-            return None
-            
-        print(f"DEBUG: safe_fetch_ticker for {symbol}")
-        
-        price = fetch_price_from_okx(symbol)
-        
-        if price and price > 0:
-            return {'price': price}
-        else:
-            return None
-            
-    except Exception as e:
-        print(f"❌ Error in safe_fetch_ticker: {e}")
+        print(f"❌ fetch_price error: {e}")
         return None
 
 # =======================================================
-# 🌐 ENGINE PRO INITIALIZATION
+# 📈 INDICATORS
 # =======================================================
 
-print("Menghubungi OKX API...")
-
-# Inisialisasi exchange dengan konfigurasi yang lebih baik
-exchange = ccxt.okx({
-    'apiKey': '',
-    'secret': '',
-    'options': {
-        'defaultType': 'swap',
-        'adjustForTimeDifference': True,
-    },
-    'enableRateLimit': True,
-    'timeout': 30000,
-})
-
-# Load markets dengan retry
-print("🔄 Loading markets from OKX...")
-loaded = False
-for attempt in range(5):
-    try:
-        print(f"  Attempt {attempt + 1}/5...")
-        exchange.load_markets()
-        print(f"  ✅ Markets loaded! Total: {len(exchange.markets)}")
-        loaded = True
-        break
-    except Exception as e:
-        print(f"  ❌ Attempt {attempt + 1} failed: {str(e)[:100]}")
-        if attempt < 4:
-            print("  ⏳ Waiting 5 seconds before retry...")
-            time.sleep(5)
-
-if not loaded:
-    print("⚠️ Gagal load markets dari OKX. Menggunakan fallback manual...")
-    exchange.markets = {}
-
-# Ambil daftar pair yang valid
-active_pairs = []
-if loaded and exchange.markets:
-    try:
-        print("📊 Memfilter futures markets...")
-        futures_markets = [
-            market for market in exchange.markets.values() 
-            if market.get('swap') and market.get('linear') and market.get('settle') == 'USDT' and market.get('active')
-        ]
-        
-        if futures_markets:
-            futures_markets.sort(
-                key=lambda x: float(x['info'].get('vol24h', 0)) if x.get('info') and 'vol24h' in x['info'] else 0, 
-                reverse=True
-            )
-            active_pairs = [market['symbol'] for market in futures_markets[:50]]
-            print(f"🔥 Sukses mendapatkan {len(active_pairs)} koin dari OKX!")
-        else:
-            print("⚠️ Tidak ada futures market ditemukan")
-    except Exception as e:
-        print(f"⚠️ Error memproses markets: {e}")
-
-# Fallback pairs jika gagal
-if not active_pairs:
-    print("📋 Menggunakan fallback pairs...")
-    active_pairs = [
-        'BTC-USDT-SWAP', 'ETH-USDT-SWAP', 'SOL-USDT-SWAP', 'XRP-USDT-SWAP', 'ADA-USDT-SWAP',
-        'AVAX-USDT-SWAP', 'DOT-USDT-SWAP', 'DOGE-USDT-SWAP', 'SHIB-USDT-SWAP', 'LINK-USDT-SWAP',
-        'NEAR-USDT-SWAP', 'MATIC-USDT-SWAP', 'LTC-USDT-SWAP', 'TRX-USDT-SWAP', 'UNI-USDT-SWAP',
-        'APT-USDT-SWAP', 'OP-USDT-SWAP', 'ARB-USDT-SWAP', 'FIL-USDT-SWAP', 'ATOM-USDT-SWAP',
-        'FTM-USDT-SWAP', 'INJ-USDT-SWAP', 'SUI-USDT-SWAP', 'RNDR-USDT-SWAP', 'GRT-USDT-SWAP',
-        'ICP-USDT-SWAP', 'STX-USDT-SWAP', 'IMX-USDT-SWAP', 'GALA-USDT-SWAP', 'THETA-USDT-SWAP',
-        'WIF-USDT-SWAP', 'PEPE-USDT-SWAP', 'BONK-USDT-SWAP', 'FLOKI-USDT-SWAP', 'TIA-USDT-SWAP',
-        'SEI-USDT-SWAP', 'ORDI-USDT-SWAP', '1INCH-USDT-SWAP', 'AAVE-USDT-SWAP', 'ALGO-USDT-SWAP',
-        'ANKR-USDT-SWAP', 'APE-USDT-SWAP', 'AXS-USDT-SWAP', 'BLUR-USDT-SWAP', 'COMP-USDT-SWAP',
-        'CRV-USDT-SWAP', 'ENS-USDT-SWAP', 'EOS-USDT-SWAP', 'FLOW-USDT-SWAP', 'SAND-USDT-SWAP'
-    ]
-    print(f"✅ Menggunakan {len(active_pairs)} fallback pairs")
-
-print(f"✅ Active pairs: {len(active_pairs)}")
-print("=" * 50)
-
-# --- MATH METRICS CALCULATORS ---
 def calculate_ema(prices, period=200):
     if not prices or len(prices) < period:
         return 0.0
@@ -587,15 +369,12 @@ def calculate_atr(candles, period=14):
     true_ranges = []
     for i in range(1, len(candles)):
         try:
-            if len(candles[i]) < 5 or len(candles[i-1]) < 5:
-                continue
             high = candles[i][2]
             low = candles[i][3]
             prev_close = candles[i-1][4]
             tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
             true_ranges.append(tr)
-        except Exception as e:
-            print(f"Error calculating ATR: {e}")
+        except:
             continue
     if len(true_ranges) < period:
         return 0.0
@@ -619,59 +398,48 @@ def get_atr_sl(candles, invalidation, trade_type, atr_multiplier=1.5, fallback_p
         sl_atr = invalidation + atr * atr_multiplier
         return max(sl_atr, sl_flat), "ATR"
 
-def run_telegram_bot():
-    print("Telegram Command Listener aktif...")
-    bot.infinity_polling()
+# =======================================================
+# 🤖 TELEGRAM BOT
+# =======================================================
 
-# --- KEYBOARDS ---
 def main_menu_keyboard():
     markup = ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
-    btn1 = KeyboardButton("🔍 Pantauan Koin")
-    btn2 = KeyboardButton("🎯 Setup Aktif (/pola)")
-    btn3 = KeyboardButton("📊 Posisi Open")
-    btn4 = KeyboardButton("📜 Histori Trade")
-    btn5 = KeyboardButton("🤖 Status Sistem")
-    markup.add(btn1, btn2, btn3, btn4, btn5)
+    markup.add(
+        KeyboardButton("🔍 Pantauan Koin"),
+        KeyboardButton("🎯 Setup Aktif (/pola)"),
+        KeyboardButton("📊 Posisi Open"),
+        KeyboardButton("📜 Histori Trade"),
+        KeyboardButton("🤖 Status Sistem")
+    )
     return markup
 
 def pairs_category_keyboard():
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(
         InlineKeyboardButton("🔥 Top 50 Vol Teraktif", callback_data="cat_top50"),
-        InlineKeyboardButton("💎 Koin Majors (Bluechip)", callback_data="cat_majors"),
-        InlineKeyboardButton("🌐 Layer 1 Ecosystem", callback_data="cat_l1"),
-        InlineKeyboardButton("🚀 Meme & Alts Populer", callback_data="cat_memes")
+        InlineKeyboardButton("💎 Koin Majors", callback_data="cat_majors"),
+        InlineKeyboardButton("🌐 Layer 1", callback_data="cat_l1"),
+        InlineKeyboardButton("🚀 Meme & Alts", callback_data="cat_memes")
     )
     return markup
 
-# --- TELEGRAM TEXT HANDLERS ---
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
     bot.send_message(message.chat.id, 
-        f"👋 *Selamat datang di Dashboard OKX Futures Pro Engine!*\n\n"
-        f"Gunakan tombol *Reply Keyboard* di bagian bawah layar Anda untuk bernavigasi.",
+        "👋 *Selamat datang di Dashboard OKX Futures Pro Engine!*\n\n"
+        "Gunakan tombol *Reply Keyboard* di bagian bawah layar.",
         parse_mode='Markdown')
 
 @bot.message_handler(commands=['test_api'])
 def test_api_command(message):
-    """Test API OKX langsung"""
     try:
         args = message.text.split()
         if len(args) < 2:
             bot.reply_to(message, "⚠️ Format: `/test_api <SYMBOL>`\nContoh: `/test_api BTC`", parse_mode='Markdown')
             return
-            
         coin = args[1].upper().strip()
-        symbols = [
-            f"{coin}-USDT",
-            f"{coin}/USDT:USDT",
-            f"{coin}USDT",
-            f"{coin}-USDT-SWAP"
-        ]
-        
-        results = []
-        results.append(f"🔍 *TESTING API OKX UNTUK {coin}*\n━━━━━━━━━━━━━━━━━━━━━\n")
-        
+        symbols = [f"{coin}-USDT", f"{coin}/USDT:USDT", f"{coin}USDT", f"{coin}-USDT-SWAP"]
+        results = [f"🔍 *TESTING API OKX UNTUK {coin}*\n━━━━━━━━━━━━━━━━━━━━━\n"]
         for sym in symbols:
             results.append(f"📊 *Symbol: {sym}*")
             price = fetch_price_from_okx(sym)
@@ -680,314 +448,149 @@ def test_api_command(message):
             else:
                 results.append(f"  ❌ No price found")
             results.append("")
-        
         bot.reply_to(message, "\n".join(results), parse_mode='Markdown')
-        
     except Exception as e:
         bot.reply_to(message, f"❌ Error: `{str(e)}`", parse_mode='Markdown')
 
-@bot.message_handler(commands=['statistik', 'stats'])
-def send_statistics(message):
-    bot.send_chat_action(message.chat.id, 'typing')
-    hasil_laporan = hitung_statistik_performa()
-    if hasil_laporan:
-        bot.send_message(message.chat.id, hasil_laporan, parse_mode="Markdown")
-    else:
-        bot.reply_to(message, "❌ Terjadi kendala saat membaca data PostgreSQL.")
-
-@bot.message_handler(commands=['backtest'])
-def handle_backtest_command(message):
-    args = message.text.split()
-    if len(args) < 2:
-        bot.reply_to(message, "⚠️ Format: `/backtest <KOIN>` (Contoh: `/backtest BTC`)", parse_mode='Markdown')
-        return
-
-    coin_name = args[1].upper().strip()
-    symbol = f"{coin_name}-USDT-SWAP"
-    loading_msg = bot.reply_to(message, f"⏳ _Menghitung Winrate premium untuk {symbol}..._", parse_mode='Markdown')
-
+@bot.message_handler(commands=['test_ohlcv'])
+def test_ohlcv_command(message):
     try:
-        candles = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME_LIVE, limit=500)
-        
-        if not candles or len(candles) < 205:
-            bot.reply_to(message, f"❌ Data transaksi historis untuk `{symbol}` tidak mencukupi.", parse_mode='Markdown')
+        args = message.text.split()
+        if len(args) < 2:
+            bot.reply_to(message, "⚠️ Format: `/test_ohlcv <SYMBOL>`\nContoh: `/test_ohlcv BTC`", parse_mode='Markdown')
             return
-
-        total_trades, wins, losses = 0, 0, 0
-        state = 'NONE'
-        trigger_level, sl_level, tp_level = 0.0, 0.0, 0.0
-
-        for i in range(202, len(candles)):
-            current_candle = candles[i]
-            prev_candle = candles[i-1]
-            current_high, current_low, current_close = current_candle[2], current_candle[3], current_candle[4]
-            current_open = current_candle[1]
-            prev_close = prev_candle[4]
-            
-            hist_candles = candles[i - CANDLE_COUNT - 2 : i - 1]
-            if not hist_candles: continue
-            
-            resistance = max([c[2] for c in hist_candles])
-            support = min([c[3] for c in hist_candles])
-            
-            avg_volume = sum([c[5] for c in hist_candles]) / len(hist_candles)
-            breakout_volume = candles[i-1][5]
-            volume_valid = breakout_volume > (avg_volume * VOLUME_MULTIPLIER)
-            
-            local_closes = [c[4] for c in candles[:i]]
-            
-            current_ema200_macro = calculate_ema(local_closes, period=200) 
-            current_rsi = calculate_rsi(local_closes, period=14)
-
-            if not current_ema200_macro or not current_rsi:
-                continue
-
-            if state == 'NONE':
-                if prev_close > resistance and volume_valid and current_close > current_ema200_macro and current_rsi < 70:
-                    state = 'BREAKOUT_BULLISH'
-                    trigger_level = resistance
-                elif prev_close < support and volume_valid and current_close < current_ema200_macro and current_rsi > 30:
-                    state = 'BREAKOUT_BEARISH'
-                    trigger_level = support
-
-            elif state == 'BREAKOUT_BULLISH':
-                body_size = abs(current_close - current_open)
-                lower_wick = min(current_open, current_close) - current_low
-                
-                retest_touched = current_low <= trigger_level * 1.002
-                retest_held = current_close > trigger_level * 0.998
-                rejection_valid = current_close > current_open and lower_wick > (body_size * 1.2)
-                
-                if retest_touched and retest_held and rejection_valid:
-                    state = 'IN_LONG'
-                    sl_level = support
-                    risk = current_close - sl_level
-                    if risk <= 0: risk = current_close * 0.005
-                    tp_level = current_close + (risk * 2)
-                    total_trades += 1
-                elif current_close < trigger_level * 0.995:
-                    state = 'NONE'
-
-            elif state == 'BREAKOUT_BEARISH':
-                body_size = abs(current_close - current_open)
-                upper_wick = current_high - max(current_open, current_close)
-                
-                retest_touched = current_high >= trigger_level * 0.998
-                retest_held = current_close < trigger_level * 1.002
-                rejection_valid = current_close < current_open and upper_wick > (body_size * 1.2)
-                
-                if retest_touched and retest_held and rejection_valid:
-                    state = 'IN_SHORT'
-                    sl_level = resistance
-                    risk = sl_level - current_close
-                    if risk <= 0: risk = current_close * 0.005
-                    tp_level = current_close - (risk * 2)
-                    total_trades += 1
-                elif current_close > trigger_level * 1.005:
-                    state = 'NONE'
-
-            elif state == 'IN_LONG':
-                if current_low <= sl_level: losses += 1; state = 'NONE'
-                elif current_high >= tp_level: wins += 1; state = 'NONE'
-
-            elif state == 'IN_SHORT':
-                if current_high >= sl_level: losses += 1; state = 'NONE'
-                elif current_low <= tp_level: wins += 1; state = 'NONE'
-
-        winrate = (wins / total_trades * 100) if total_trades > 0 else 0.0
+        coin = args[1].upper().strip()
+        symbol = f"{coin}-USDT-SWAP"
         
-        report_text = (
-            f"📊 *LAPORAN WINRATE (CONFIRMED RETEST)*\n"
-            f"━━━━━━━━━━━━━━━━━━━━━\n"
-            f"Aset: `{symbol}` | TF: `{TIMEFRAME_LIVE}`\n"
-            f"🔹 Total Sinyal Valid: *{total_trades}*\n"
-            f"🟢 Profit (Wins): *{wins}* | 🔴 Loss: *{losses}*\n\n"
-            f"🎯 *OPTIMIZED WIN RATE: {winrate:.2f}%* 🔥"
-        )
+        bot.reply_to(message, f"⏳ _Mengambil data OHLCV untuk {symbol}..._", parse_mode='Markdown')
         
-        try: bot.delete_message(message.chat.id, loading_msg.message_id)
-        except: pass
+        candles = fetch_ohlcv_from_okx(symbol, timeframe='15m', limit=10)
+        
+        if candles and len(candles) > 0:
+            text = f"📊 *OHLCV DATA UNTUK {coin}*\n━━━━━━━━━━━━━━━━━━━━━\n"
+            for candle in candles[-5:]:  # Show last 5 candles
+                ts = time.strftime('%H:%M', time.localtime(candle[0]/1000))
+                text += f"`{ts} | O:{candle[1]:.2f} H:{candle[2]:.2f} L:{candle[3]:.2f} C:{candle[4]:.2f}`\n"
+            bot.reply_to(message, text, parse_mode='Markdown')
+        else:
+            bot.reply_to(message, f"❌ *Gagal mengambil data OHLCV untuk {symbol}*", parse_mode='Markdown')
             
-        bot.reply_to(message, report_text, parse_mode='Markdown')
-
     except Exception as e:
-        try: bot.delete_message(message.chat.id, loading_msg.message_id)
-        except: pass
-        bot.reply_to(message, f"❌ *Gagal memproses backtest.*\nDetail: `{str(e)}`", parse_mode='Markdown')
+        bot.reply_to(message, f"❌ Error: `{str(e)}`", parse_mode='Markdown')
 
 @bot.message_handler(func=lambda msg: True)
 def handle_reply_keyboard(message):
     text = message.text
-    print(f"DEBUG: Keyboard clicked: {text}")
-    
     if text == "🔍 Pantauan Koin":
-        bot.send_message(message.chat.id, "📂 *Silakan pilih kategori koin:*", parse_mode='Markdown', reply_markup=pairs_category_keyboard())
+        bot.send_message(message.chat.id, "📂 *Pilih kategori:*", parse_mode='Markdown', reply_markup=pairs_category_keyboard())
     elif text == "🎯 Setup Aktif (/pola)":
         send_active_patterns(message)
     elif text == "📊 Posisi Open":
-        try:
-            send_open_positions(message)
-        except Exception as e:
-            print(f"❌ Error: {e}")
-            import traceback
-            traceback.print_exc()
-            bot.reply_to(message, f"❌ *Error:* `{str(e)}`", parse_mode='Markdown')
+        send_open_positions(message)
     elif text == "📜 Histori Trade":
         send_trade_history(message)
     elif text == "🤖 Status Sistem":
         db_type = "PostgreSQL (Railway)" if DATABASE_URL else "SQLite (Fallback)"
-        bot.reply_to(message, f"✅ *Bot Status:* Online.\n🎯 *Engine:* Memantau {len(active_pairs)} koin.\n🗄️ *Database:* {db_type} Terkoneksi & Aman.", parse_mode='Markdown')
+        bot.reply_to(message, f"✅ *Bot Status:* Online.\n📊 *Engine:* Memantau {len(active_pairs)} koin.\n🗄️ *Database:* {db_type}", parse_mode='Markdown')
 
 def send_active_patterns(message):
-    waiting_retest = [symbol for symbol, data in pair_states.items() if data['status'] in ['BREAKOUT_BULLISH', 'BREAKOUT_BEARISH']]
+    waiting_retest = [s for s, d in pair_states.items() if d['status'] in ['BREAKOUT_BULLISH', 'BREAKOUT_BEARISH']]
     if not waiting_retest:
-        bot.send_message(message.chat.id, "⏳ *Bersih.* Belum ada koin baru yang masuk radar breakout.", parse_mode='Markdown')
+        bot.send_message(message.chat.id, "⏳ *Bersih.* Tidak ada setup.", parse_mode='Markdown')
         return
     text = "🎯 *Setup Menunggu Retest:*\n\n"
     for symbol in waiting_retest:
         status = pair_states[symbol]['status']
         level = pair_states[symbol]['level']
-        emoji = "🚀 Bullish (LONG)" if "BULLISH" in status else "💥 Bearish (SHORT)"
-        text += f"• *{symbol.replace('-USDT-SWAP','')}*: {emoji} | Level Key: `{level}`\n"
+        emoji = "🚀 LONG" if "BULLISH" in status else "💥 SHORT"
+        text += f"• *{symbol.replace('-USDT-SWAP','')}*: {emoji} | Key: `{level}`\n"
     bot.send_message(message.chat.id, text, parse_mode='Markdown')
 
 def send_open_positions(message):
-    """Menampilkan semua posisi yang sedang open"""
     try:
-        print("=" * 50)
-        print("DEBUG: send_open_positions dipanggil")
-        
-        loading_msg = bot.send_message(message.chat.id, "⏳ _Mengambil data posisi..._", parse_mode='Markdown')
-        
+        loading_msg = bot.send_message(message.chat.id, "⏳ _Mengambil data..._", parse_mode='Markdown')
         open_trades = get_open_trades_dict()
-        print(f"DEBUG: open_trades = {open_trades}")
         
         if not open_trades:
-            bot.edit_message_text(
-                "📭 *Tidak ada posisi trading yang aktif saat ini.*",
-                chat_id=message.chat.id,
-                message_id=loading_msg.message_id,
-                parse_mode='Markdown'
-            )
+            bot.edit_message_text("📭 *Tidak ada posisi aktif.*", chat_id=message.chat.id, message_id=loading_msg.message_id, parse_mode='Markdown')
             return
-            
+        
         try:
             bot.delete_message(message.chat.id, loading_msg.message_id)
         except:
             pass
         
         messages = []
-        current_message = "📊 *DAFTAR POSISI YANG SEDANG OPEN:*\n━━━━━━━━━━━━━━━━━━━━━\n"
+        current_msg = "📊 *POSISI OPEN:*\n━━━━━━━━━━━━━━━━━━━━━\n"
         has_data = False
-        error_count = 0
-        pos_count = 0
         
         for symbol, data in open_trades.items():
             try:
-                print(f"\n{'='*30}")
-                print(f"DEBUG: Processing {symbol}")
-                
-                if not symbol or not isinstance(symbol, str):
-                    error_count += 1
-                    continue
-                
-                clean_symbol = symbol.strip()
-                if not clean_symbol:
-                    error_count += 1
-                    continue
-                
                 tipe = data.get('type', 'UNKNOWN')
-                entry_price = float(data.get('entry', 0))
-                sl_price = float(data.get('sl', 0))
-                tp_price = float(data.get('tp', 0))
+                entry = float(data.get('entry', 0))
+                sl = float(data.get('sl', 0))
+                tp = float(data.get('tp', 0))
                 
-                if entry_price == 0 or sl_price == 0 or tp_price == 0:
-                    print(f"⚠️ Data tidak lengkap untuk {clean_symbol}")
-                    error_count += 1
+                if entry <= 0 or sl <= 0 or tp <= 0:
                     continue
                 
-                # Ambil harga terkini dari OKX API langsung
-                current_price = entry_price
-                try:
-                    price = fetch_price_from_okx(clean_symbol)
-                    if price and price > 0:
-                        current_price = price
-                        print(f"✅ Price found for {clean_symbol}: {current_price}")
-                    else:
-                        print(f"⚠️ No price found, using entry price: {entry_price}")
-                except Exception as e:
-                    print(f"❌ Error fetching price: {e}")
-
-                # Hitung PnL
+                # Get current price from OKX API
+                current_price = entry
+                price = fetch_price_from_okx(symbol)
+                if price and price > 0:
+                    current_price = price
+                
+                # Calculate PnL
                 if tipe.upper() == 'LONG':
-                    pnl_nominal = current_price - entry_price
-                    pnl_percent = (pnl_nominal / entry_price) * 100
-                    tipe_emoji = "🟢 LONG"
+                    pnl_pct = ((current_price - entry) / entry) * 100
+                    emoji = "🟢 LONG"
                 else:
-                    pnl_nominal = entry_price - current_price
-                    pnl_percent = (pnl_nominal / entry_price) * 100
-                    tipe_emoji = "🔴 SHORT"
-
-                if pnl_nominal >= 0:
-                    pnl_status = f"✅ *+{pnl_percent:.2f}%*"
-                else:
-                    pnl_status = f"❌ *{pnl_percent:.2f}%*"
-
-                coin = clean_symbol.replace('-USDT-SWAP', '').replace('-SWAP', '')
+                    pnl_pct = ((entry - current_price) / entry) * 100
+                    emoji = "🔴 SHORT"
+                
+                pnl_status = f"✅ *+{pnl_pct:.2f}%*" if pnl_pct >= 0 else f"❌ *{pnl_pct:.2f}%*"
+                coin = symbol.replace('-USDT-SWAP', '').replace('-SWAP', '')
+                
                 pos_text = (
-                    f"• *{coin}* ({tipe_emoji})\n"
-                    f"  📥 Entry: `{entry_price:.4f}`\n"
+                    f"• *{coin}* ({emoji})\n"
+                    f"  📥 Entry: `{entry:.4f}`\n"
                     f"  ⚡ Current: `{current_price:.4f}`\n"
-                    f"  🛑 SL: `{sl_price:.4f}` | 🎯 TP: `{tp_price:.4f}`\n"
+                    f"  🛑 SL: `{sl:.4f}` | 🎯 TP: `{tp:.4f}`\n"
                     f"  💰 PnL: {pnl_status}\n"
                     f"━━━━━━━━━━━━━━━━━━━━━\n"
                 )
                 
-                if len(current_message) + len(pos_text) > 4000:
-                    messages.append(current_message)
-                    current_message = "📊 *DAFTAR POSISI YANG SEDANG OPEN (LANJUTAN):*\n━━━━━━━━━━━━━━━━━━━━━\n"
+                if len(current_msg) + len(pos_text) > 4000:
+                    messages.append(current_msg)
+                    current_msg = "📊 *POSISI OPEN (LANJUTAN):*\n━━━━━━━━━━━━━━━━━━━━━\n"
                 
-                current_message += pos_text
+                current_msg += pos_text
                 has_data = True
-                pos_count += 1
                 
             except Exception as e:
-                print(f"❌ Error processing {symbol}: {e}")
-                import traceback
-                traceback.print_exc()
-                error_count += 1
+                print(f"Error processing {symbol}: {e}")
                 continue
         
-        if current_message and current_message != "📊 *DAFTAR POSISI YANG SEDANG OPEN:*\n━━━━━━━━━━━━━━━━━━━━━\n":
-            messages.append(current_message)
+        if current_msg and current_msg != "📊 *POSISI OPEN:*\n━━━━━━━━━━━━━━━━━━━━━\n":
+            messages.append(current_msg)
         
         if has_data:
-            print(f"\nDEBUG: Mengirim {len(messages)} pesan dengan {pos_count} posisi")
             for msg in messages:
                 bot.send_message(message.chat.id, msg, parse_mode='Markdown')
         else:
-            bot.send_message(
-                message.chat.id,
-                f"❌ *Tidak ada data posisi yang valid.*\nTotal: {len(open_trades)}, Error: {error_count}",
-                parse_mode='Markdown'
-            )
-            
-        print("=" * 50)
+            bot.send_message(message.chat.id, "❌ *Tidak ada data posisi valid.*", parse_mode='Markdown')
             
     except Exception as e:
-        print(f"❌ Error: {str(e)}")
-        import traceback
-        traceback.print_exc()
         bot.reply_to(message, f"❌ Error: `{str(e)}`", parse_mode='Markdown')
 
 def send_trade_history(message):
     history = get_recent_history(10)
     if not history:
-        bot.send_message(message.chat.id, "📜 *Belum ada histori transaksi di database.*", parse_mode='Markdown')
+        bot.send_message(message.chat.id, "📜 *Belum ada histori.*", parse_mode='Markdown')
         return
     
     messages = []
-    current_message = f"📜 *RIWAYAT TRANSAKSI TERAKHIR ({len(history)}):*\n━━━━━━━━━━━━━━━━━━━━━\n"
+    current_msg = f"📜 *HISTORI ({len(history)}):*\n━━━━━━━━━━━━━━━━━━━━━\n"
     
     for data in history:
         try:
@@ -1000,76 +603,61 @@ def send_trade_history(message):
                 pnl_pct = ((exit_price - entry) / entry) * 100
             else:
                 pnl_pct = ((entry - exit_price) / entry) * 100
-
-            if data['result'] == 'TP':
-                hasil_text = f"✅ TAKE PROFIT (+{pnl_pct:.2f}%)"
-                emoji_prefix = "🟢"
-            else:
-                hasil_text = f"❌ STOP LOSS ({pnl_pct:.2f}%)"
-                emoji_prefix = "🔴"
-
+            
+            emoji = "🟢" if data['result'] == 'TP' else "🔴"
+            result_text = f"{emoji} *{data['result']}* ({pnl_pct:+.2f}%)"
+            
             pos_text = (
-                f"• *{coin}* | {emoji_prefix} *{data['result']}*\n"
-                f"  ↕️ Tipe: `{tipe}` | *{pnl_pct:+.2f}%*\n"
+                f"• *{coin}* {result_text}\n"
                 f"  📥 Entry: `{entry:.4f}` | 🚪 Exit: `{exit_price:.4f}`\n"
-                f"  Status Akhir: {hasil_text}\n"
                 f"━━━━━━━━━━━━━━━━━━━━━\n"
             )
             
-            if len(current_message) + len(pos_text) > 4000:
-                messages.append(current_message)
-                current_message = f"📜 *RIWAYAT TRANSAKSI (LANJUTAN):*\n━━━━━━━━━━━━━━━━━━━━━\n"
+            if len(current_msg) + len(pos_text) > 4000:
+                messages.append(current_msg)
+                current_msg = f"📜 *HISTORI (LANJUTAN):*\n━━━━━━━━━━━━━━━━━━━━━\n"
             
-            current_message += pos_text
+            current_msg += pos_text
             
         except Exception as e:
-            print(f"Error processing history item: {e}")
+            print(f"Error: {e}")
             continue
     
-    if current_message and current_message != f"📜 *RIWAYAT TRANSAKSI TERAKHIR ({len(history)}):*\n━━━━━━━━━━━━━━━━━━━━━\n":
-        messages.append(current_message)
+    if current_msg and current_msg != f"📜 *HISTORI ({len(history)}):*\n━━━━━━━━━━━━━━━━━━━━━\n":
+        messages.append(current_msg)
     
     for msg in messages:
         bot.send_message(message.chat.id, msg, parse_mode='Markdown')
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('cat_'))
 def handle_category_selection(call):
-    category = call.data
-    if category == "cat_top50":
-        pairs_list = ", ".join([p.replace('-USDT-SWAP', '') for p in active_pairs])
-        text = f"🔥 *Top 50 Koin Volume Teraktif OKX:*\n\n`{pairs_list}`"
-    elif category == "cat_majors":
-        text = "💎 *Koin Kategori Majors:*\n\n`BTC, ETH, SOL, XRP, ADA, LTC, LINK, DOT`"
-    elif category == "cat_l1":
-        text = "🌐 *Koin Kategori Layer 1 Ecosystem:*\n\n`AVAX, ATOM, NEAR, FTM, SUI, APT, INJ, SEI`"
-    elif category == "cat_memes":
-        text = "🚀 *Koin Kategori Meme & Alts:*\n\n`DOGE, SHIB, PEPE, WIF, BONK, FLOKI, GALA, OP, ARB`"
-        
-    bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text=text, parse_mode='Markdown', reply_markup=pairs_category_keyboard())
+    if call.data == "cat_top50":
+        pairs = ", ".join([p.replace('-USDT-SWAP', '') for p in active_pairs])
+        text = f"🔥 *Top 50:*\n\n`{pairs}`"
+    elif call.data == "cat_majors":
+        text = "💎 *Majors:*\n\n`BTC, ETH, SOL, XRP, ADA, LTC, LINK, DOT`"
+    elif call.data == "cat_l1":
+        text = "🌐 *Layer 1:*\n\n`AVAX, ATOM, NEAR, FTM, SUI, APT, INJ, SEI`"
+    elif call.data == "cat_memes":
+        text = "🚀 *Meme & Alts:*\n\n`DOGE, SHIB, PEPE, WIF, BONK, FLOKI, GALA, OP, ARB`"
+    bot.edit_message_text(text, chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode='Markdown', reply_markup=pairs_category_keyboard())
     bot.answer_callback_query(call.id)
 
-# --- CORE MARKETS SCANNER WITH CONFIRMED RETEST ---
+# =======================================================
+# 🔍 SCANNER (MENGGUNAKAN OKX API TANPA CCXT)
+# =======================================================
+
 def scan_breakout_retest(symbol):
     global pair_states
     try:
         if not symbol:
             return
-            
-        try:
-            candles = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME_LIVE, limit=100)
-        except Exception as e:
-            print(f"Gagal fetch data untuk {symbol}: {e}")
-            return
-            
+        
+        # Fetch candles langsung dari OKX API
+        candles = fetch_ohlcv_from_okx(symbol, timeframe=TIMEFRAME_LIVE, limit=100)
         if not candles or len(candles) < CANDLE_COUNT:
-            print(f"Data tidak cukup untuk {symbol}: {len(candles)} candles")
             return
-
-        for candle in candles:
-            if not candle or len(candle) < 6:
-                print(f"Data candle tidak valid untuk {symbol}")
-                return
-
+        
         current_candle = candles[-1]
         prev_candle = candles[-2]
         current_close = current_candle[4]
@@ -1077,186 +665,226 @@ def scan_breakout_retest(symbol):
         current_high = current_candle[2]
         current_open = current_candle[1]
         prev_close = prev_candle[4]
-
+        
         if symbol not in pair_states:
             pair_states[symbol] = {'status': 'NONE', 'level': 0.0, 'sl': 0.0, 'tp': 0.0}
-
-        waktu_sekarang = time.strftime("%H:%M:%S")
-
-        # Monitoring LONG
+        
+        waktu = time.strftime("%H:%M:%S")
+        open_trades = get_open_trades_dict()
+        
+        # Check LONG position
         if pair_states[symbol]['status'] == 'IN_LONG':
-            sl_level = pair_states[symbol]['sl']
-            tp_level = pair_states[symbol]['tp']
-            open_trades = get_open_trades_dict()
-            entry_p = open_trades[symbol]['entry'] if symbol in open_trades else current_close
+            sl = pair_states[symbol]['sl']
+            tp = pair_states[symbol]['tp']
+            entry = open_trades[symbol]['entry'] if symbol in open_trades else current_close
             
-            if current_low <= sl_level:
-                pnl_pct = ((sl_level - entry_p) / entry_p) * 100
-                bot.send_message(TELEGRAM_CHAT_ID, f"🔴 *TRADE CLOSED (STOP LOSS)*\n\nPair: `{symbol.replace('-USDT-SWAP', '')}`\n📥 Entry: `{entry_p:.4f}`\n🚪 Exit (SL): `{sl_level:.4f}`\n📉 Hasil: *{pnl_pct:.2f}%*", parse_mode='Markdown')
+            if current_low <= sl:
+                pnl = ((sl - entry) / entry) * 100
+                bot.send_message(TELEGRAM_CHAT_ID, f"🔴 *STOP LOSS*\n{symbol.replace('-USDT-SWAP', '')}\nEntry: {entry:.4f}\nExit: {sl:.4f}\nPnL: {pnl:.2f}%", parse_mode='Markdown')
                 if symbol in open_trades:
-                    insert_trade_history(symbol, 'LONG', entry_p, sl_level, 'SL', waktu_sekarang)
+                    insert_trade_history(symbol, 'LONG', entry, sl, 'SL', waktu)
                     delete_open_trade(symbol)
                 pair_states[symbol] = {'status': 'NONE', 'level': 0.0, 'sl': 0.0, 'tp': 0.0}
                 return
-            elif current_high >= tp_level:
-                pnl_pct = ((tp_level - entry_p) / entry_p) * 100
-                bot.send_message(TELEGRAM_CHAT_ID, f"🟢 *TRADE CLOSED (TAKE PROFIT) 🔥*\n\nPair: `{symbol.replace('-USDT-SWAP', '')}`\n📥 Entry: `{entry_p:.4f}`\n🚪 Exit (TP): `{tp_level:.4f}`\n📈 Profit: *+{pnl_pct:.2f}%*", parse_mode='Markdown')
+            elif current_high >= tp:
+                pnl = ((tp - entry) / entry) * 100
+                bot.send_message(TELEGRAM_CHAT_ID, f"🟢 *TAKE PROFIT*\n{symbol.replace('-USDT-SWAP', '')}\nEntry: {entry:.4f}\nExit: {tp:.4f}\nPnL: +{pnl:.2f}%", parse_mode='Markdown')
                 if symbol in open_trades:
-                    insert_trade_history(symbol, 'LONG', entry_p, tp_level, 'TP', waktu_sekarang)
+                    insert_trade_history(symbol, 'LONG', entry, tp, 'TP', waktu)
                     delete_open_trade(symbol)
                 pair_states[symbol] = {'status': 'NONE', 'level': 0.0, 'sl': 0.0, 'tp': 0.0}
                 return
             else:
                 return
-
-        # Monitoring SHORT
+        
+        # Check SHORT position
         if pair_states[symbol]['status'] == 'IN_SHORT':
-            sl_level = pair_states[symbol]['sl']
-            tp_level = pair_states[symbol]['tp']
-            open_trades = get_open_trades_dict()
-            entry_p = open_trades[symbol]['entry'] if symbol in open_trades else current_close
+            sl = pair_states[symbol]['sl']
+            tp = pair_states[symbol]['tp']
+            entry = open_trades[symbol]['entry'] if symbol in open_trades else current_close
             
-            if current_high >= sl_level:
-                pnl_pct = ((entry_p - sl_level) / entry_p) * 100
-                bot.send_message(TELEGRAM_CHAT_ID, f"🔴 *TRADE CLOSED (STOP LOSS)*\n\nPair: `{symbol.replace('-USDT-SWAP', '')}`\n📥 Entry: `{entry_p:.4f}`\n🚪 Exit (SL): `{sl_level:.4f}`\n📉 Hasil: *{pnl_pct:.2f}%*", parse_mode='Markdown')
+            if current_high >= sl:
+                pnl = ((entry - sl) / entry) * 100
+                bot.send_message(TELEGRAM_CHAT_ID, f"🔴 *STOP LOSS*\n{symbol.replace('-USDT-SWAP', '')}\nEntry: {entry:.4f}\nExit: {sl:.4f}\nPnL: {pnl:.2f}%", parse_mode='Markdown')
                 if symbol in open_trades:
-                    insert_trade_history(symbol, 'SHORT', entry_p, sl_level, 'SL', waktu_sekarang)
+                    insert_trade_history(symbol, 'SHORT', entry, sl, 'SL', waktu)
                     delete_open_trade(symbol)
                 pair_states[symbol] = {'status': 'NONE', 'level': 0.0, 'sl': 0.0, 'tp': 0.0}
                 return
-            elif current_low <= tp_level:
-                pnl_pct = ((entry_p - tp_level) / entry_p) * 100
-                bot.send_message(TELEGRAM_CHAT_ID, f"🟢 *TRADE CLOSED (TAKE PROFIT) 🔥*\n\nPair: `{symbol.replace('-USDT-SWAP', '')}`\n📥 Entry: `{entry_p:.4f}`\n🚪 Exit (TP): `{tp_level:.4f}`\n📈 Profit: *+{pnl_pct:.2f}%*", parse_mode='Markdown')
+            elif current_low <= tp:
+                pnl = ((entry - tp) / entry) * 100
+                bot.send_message(TELEGRAM_CHAT_ID, f"🟢 *TAKE PROFIT*\n{symbol.replace('-USDT-SWAP', '')}\nEntry: {entry:.4f}\nExit: {tp:.4f}\nPnL: +{pnl:.2f}%", parse_mode='Markdown')
                 if symbol in open_trades:
-                    insert_trade_history(symbol, 'SHORT', entry_p, tp_level, 'TP', waktu_sekarang)
+                    insert_trade_history(symbol, 'SHORT', entry, tp, 'TP', waktu)
                     delete_open_trade(symbol)
                 pair_states[symbol] = {'status': 'NONE', 'level': 0.0, 'sl': 0.0, 'tp': 0.0}
                 return
             else:
                 return
-
-        # Analisis Sinyal Teknis
-        try:
-            macro_candles = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME_MACRO, limit=205)
-            macro_closes = [c[4] for c in macro_candles]
-            ema200_macro = calculate_ema(macro_closes, period=200)
-        except Exception as e:
-            print(f"Error getting macro data for {symbol}: {e}")
+        
+        # Analysis - Fetch macro candles
+        macro_candles = fetch_ohlcv_from_okx(symbol, timeframe=TIMEFRAME_MACRO, limit=205)
+        if not macro_candles:
             return
-
-        historical_candles = candles[-52:-2]
-        if not historical_candles:
+        
+        macro_closes = [c[4] for c in macro_candles]
+        ema200 = calculate_ema(macro_closes, period=200)
+        
+        hist_candles = candles[-52:-2]
+        if not hist_candles:
             return
-            
-        resistance = max([c[2] for c in historical_candles])
-        support = min([c[3] for c in historical_candles])
-        avg_volume = sum([c[5] for c in historical_candles]) / len(historical_candles)
-        volume_valid = prev_candle[5] > (avg_volume * VOLUME_MULTIPLIER)
-        current_rsi = calculate_rsi([c[4] for c in candles], period=14)
-
-        # BULLISH BREAKOUT
-        if prev_close > resistance and volume_valid and current_close > ema200_macro and current_rsi < 70:
+        
+        resistance = max([c[2] for c in hist_candles])
+        support = min([c[3] for c in hist_candles])
+        avg_vol = sum([c[5] for c in hist_candles]) / len(hist_candles)
+        vol_valid = prev_candle[5] > (avg_vol * VOLUME_MULTIPLIER)
+        rsi = calculate_rsi([c[4] for c in candles], period=14)
+        
+        # BULLISH
+        if prev_close > resistance and vol_valid and current_close > ema200 and rsi < 70:
             if pair_states[symbol]['status'] != 'BREAKOUT_BULLISH':
                 pair_states[symbol] = {'status': 'BREAKOUT_BULLISH', 'level': resistance, 'sl': support, 'tp': 0.0}
-                bot.send_message(TELEGRAM_CHAT_ID, f"🚀 *VALID BULLISH BREAKOUT*\n\nPair: `{symbol.replace('-USDT-SWAP', '')}`\nLevel: {resistance}\n_Menunggu konfirmasi pola pantulan Retest..._", parse_mode='Markdown')
-
+                bot.send_message(TELEGRAM_CHAT_ID, f"🚀 *BULLISH BREAKOUT*\n{symbol.replace('-USDT-SWAP', '')}\nLevel: {resistance:.4f}\nWaiting retest...", parse_mode='Markdown')
+        
         elif pair_states[symbol]['status'] == 'BREAKOUT_BULLISH':
-            target_res = pair_states[symbol]['level']
-            body_size = abs(current_close - current_open)
+            target = pair_states[symbol]['level']
+            body = abs(current_close - current_open)
             lower_wick = min(current_open, current_close) - current_low
             
-            retest_touched = current_low <= target_res * 1.002
-            retest_held = current_close > target_res * 0.998
-            rejection_confirmed = current_close > current_open and lower_wick > (body_size * 1.2)
-            
-            if retest_touched and retest_held and rejection_confirmed:
-                invalidation_long = pair_states[symbol]['sl']
-                stop_loss, sl_method = get_atr_sl(candles, invalidation_long, 'LONG')
-                risk = current_close - stop_loss
+            if current_low <= target * 1.002 and current_close > target * 0.998 and current_close > current_open and lower_wick > (body * 1.2):
+                sl, method = get_atr_sl(candles, pair_states[symbol]['sl'], 'LONG')
+                risk = current_close - sl
                 if risk <= 0:
                     risk = current_close * 0.005
-                take_profit = current_close + (risk * 2)
+                tp = current_close + (risk * 2)
                 
-                pair_states[symbol] = {'status': 'IN_LONG', 'level': target_res, 'sl': stop_loss, 'tp': take_profit}
-                save_open_trade(symbol, 'LONG', current_close, stop_loss, take_profit, waktu_sekarang)
+                pair_states[symbol] = {'status': 'IN_LONG', 'level': target, 'sl': sl, 'tp': tp}
+                save_open_trade(symbol, 'LONG', current_close, sl, tp, waktu)
                 
-                atr_val = calculate_atr(candles, period=14)
-                if atr_val > 0:
-                    atr_info = f"ATR14={atr_val:.4f}"
-                else:
-                    atr_info = "ATR=N/A (gunakan flat)"
-                    
-                bot.send_message(TELEGRAM_CHAT_ID, f"🎯 *RETEST SUCCESS (ENTRY LONG)*\n\nPair: `{symbol.replace('-USDT-SWAP', '')}`\n📥 Entry: `{current_close:.4f}`\n🛑 SL: `{stop_loss:.4f}` ({sl_method}, {atr_info})\n🎯 TP: `{take_profit:.4f}`", parse_mode='Markdown')
-
-        # BEARISH BREAKDOWN
-        elif prev_close < support and volume_valid and current_close < ema200_macro and current_rsi > 30:
+                atr = calculate_atr(candles, period=14)
+                atr_info = f"ATR14={atr:.4f}" if atr > 0 else "ATR=N/A"
+                bot.send_message(TELEGRAM_CHAT_ID, f"🎯 *ENTRY LONG*\n{symbol.replace('-USDT-SWAP', '')}\nEntry: {current_close:.4f}\nSL: {sl:.4f} ({method})\nTP: {tp:.4f}\n{atr_info}", parse_mode='Markdown')
+        
+        # BEARISH
+        elif prev_close < support and vol_valid and current_close < ema200 and rsi > 30:
             if pair_states[symbol]['status'] != 'BREAKOUT_BEARISH':
                 pair_states[symbol] = {'status': 'BREAKOUT_BEARISH', 'level': support, 'sl': resistance, 'tp': 0.0}
-                bot.send_message(TELEGRAM_CHAT_ID, f"💥 *VALID BEARISH BREAKDOWN*\n\nPair: `{symbol.replace('-USDT-SWAP', '')}`\nLevel Broken: `{support}`\n_Menunggu konfirmasi pola pantulan Retest..._", parse_mode='Markdown')
-
+                bot.send_message(TELEGRAM_CHAT_ID, f"💥 *BEARISH BREAKDOWN*\n{symbol.replace('-USDT-SWAP', '')}\nLevel: {support:.4f}\nWaiting retest...", parse_mode='Markdown')
+        
         elif pair_states[symbol]['status'] == 'BREAKOUT_BEARISH':
-            target_sup = pair_states[symbol]['level']
-            body_size = abs(current_close - current_open)
+            target = pair_states[symbol]['level']
+            body = abs(current_close - current_open)
             upper_wick = current_high - max(current_open, current_close)
             
-            retest_touched = current_high >= target_sup * 0.998
-            retest_held = current_close < target_sup * 1.002
-            rejection_confirmed = current_close < current_open and upper_wick > (body_size * 1.2)
-            
-            if retest_touched and retest_held and rejection_confirmed:
-                invalidation_short = pair_states[symbol]['sl']
-                stop_loss, sl_method = get_atr_sl(candles, invalidation_short, 'SHORT')
-                risk = stop_loss - current_close
+            if current_high >= target * 0.998 and current_close < target * 1.002 and current_close < current_open and upper_wick > (body * 1.2):
+                sl, method = get_atr_sl(candles, pair_states[symbol]['sl'], 'SHORT')
+                risk = sl - current_close
                 if risk <= 0:
                     risk = current_close * 0.005
-                take_profit = current_close - (risk * 2)
+                tp = current_close - (risk * 2)
                 
-                pair_states[symbol] = {'status': 'IN_SHORT', 'level': target_sup, 'sl': stop_loss, 'tp': take_profit}
-                save_open_trade(symbol, 'SHORT', current_close, stop_loss, take_profit, waktu_sekarang)
+                pair_states[symbol] = {'status': 'IN_SHORT', 'level': target, 'sl': sl, 'tp': tp}
+                save_open_trade(symbol, 'SHORT', current_close, sl, tp, waktu)
                 
-                atr_val = calculate_atr(candles, period=14)
-                if atr_val > 0:
-                    atr_info = f"ATR14={atr_val:.4f}"
-                else:
-                    atr_info = "ATR=N/A (gunakan flat)"
-                    
-                bot.send_message(TELEGRAM_CHAT_ID, f"🎯 *RETEST SUCCESS (ENTRY SHORT)*\n\nPair: `{symbol.replace('-USDT-SWAP', '')}`\n📥 Entry: `{current_close:.4f}`\n🛑 SL: `{stop_loss:.4f}` ({sl_method}, {atr_info})\n🎯 TP: `{take_profit:.4f}`", parse_mode='Markdown')
-
-        # Reset jika breakout gagal
+                atr = calculate_atr(candles, period=14)
+                atr_info = f"ATR14={atr:.4f}" if atr > 0 else "ATR=N/A"
+                bot.send_message(TELEGRAM_CHAT_ID, f"🎯 *ENTRY SHORT*\n{symbol.replace('-USDT-SWAP', '')}\nEntry: {current_close:.4f}\nSL: {sl:.4f} ({method})\nTP: {tp:.4f}\n{atr_info}", parse_mode='Markdown')
+        
+        # Reset if breakout fails
         if pair_states[symbol]['status'] == 'BREAKOUT_BULLISH':
-            target_res = pair_states[symbol]['level']
-            if current_close < target_res * 0.995:
+            target = pair_states[symbol]['level']
+            if current_close < target * 0.995:
                 pair_states[symbol] = {'status': 'NONE', 'level': 0.0, 'sl': 0.0, 'tp': 0.0}
         elif pair_states[symbol]['status'] == 'BREAKOUT_BEARISH':
-            target_sup = pair_states[symbol]['level']
-            if current_close > target_sup * 1.005:
+            target = pair_states[symbol]['level']
+            if current_close > target * 1.005:
                 pair_states[symbol] = {'status': 'NONE', 'level': 0.0, 'sl': 0.0, 'tp': 0.0}
-
+                
     except Exception as e:
-        print(f"Error scan {symbol}: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        
-        if symbol in pair_states:
-            if pair_states[symbol]['status'] not in ['IN_LONG', 'IN_SHORT']:
-                pair_states[symbol] = {'status': 'NONE', 'level': 0.0, 'sl': 0.0, 'tp': 0.0}
+        print(f"Scan error {symbol}: {e}")
+        if symbol in pair_states and pair_states[symbol]['status'] not in ['IN_LONG', 'IN_SHORT']:
+            pair_states[symbol] = {'status': 'NONE', 'level': 0.0, 'sl': 0.0, 'tp': 0.0}
+
+# =======================================================
+# 🚀 MAIN
+# =======================================================
 
 def main():
-    print("Memulai aplikasi...")
-    init_db()               
-    load_saved_positions()  
+    print("=" * 50)
+    print("🚀 Starting OKX Bot (No CCXT - Direct API)")
+    print("=" * 50)
     
+    init_db()
+    
+    # Set fallback pairs
+    global active_pairs
+    active_pairs = [
+        'BTC-USDT-SWAP', 'ETH-USDT-SWAP', 'SOL-USDT-SWAP', 'XRP-USDT-SWAP', 'ADA-USDT-SWAP',
+        'AVAX-USDT-SWAP', 'DOT-USDT-SWAP', 'DOGE-USDT-SWAP', 'SHIB-USDT-SWAP', 'LINK-USDT-SWAP',
+        'NEAR-USDT-SWAP', 'MATIC-USDT-SWAP', 'LTC-USDT-SWAP', 'TRX-USDT-SWAP', 'UNI-USDT-SWAP',
+        'APT-USDT-SWAP', 'OP-USDT-SWAP', 'ARB-USDT-SWAP', 'FIL-USDT-SWAP', 'ATOM-USDT-SWAP',
+        'FTM-USDT-SWAP', 'INJ-USDT-SWAP', 'SUI-USDT-SWAP', 'RNDR-USDT-SWAP', 'GRT-USDT-SWAP',
+        'ICP-USDT-SWAP', 'STX-USDT-SWAP', 'IMX-USDT-SWAP', 'GALA-USDT-SWAP', 'THETA-USDT-SWAP',
+        'WIF-USDT-SWAP', 'PEPE-USDT-SWAP', 'BONK-USDT-SWAP', 'FLOKI-USDT-SWAP', 'TIA-USDT-SWAP',
+        'SEI-USDT-SWAP', 'ORDI-USDT-SWAP', '1INCH-USDT-SWAP', 'AAVE-USDT-SWAP', 'ALGO-USDT-SWAP',
+        'ANKR-USDT-SWAP', 'APE-USDT-SWAP', 'AXS-USDT-SWAP', 'BLUR-USDT-SWAP', 'COMP-USDT-SWAP',
+        'CRV-USDT-SWAP', 'ENS-USDT-SWAP', 'EOS-USDT-SWAP', 'FLOW-USDT-SWAP', 'SAND-USDT-SWAP'
+    ]
+    print(f"📊 Monitoring {len(active_pairs)} pairs")
+    
+    # Load saved positions
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT symbol, type, sl, tp FROM open_trades")
+        rows = cursor.fetchall()
+        for row in rows:
+            symbol, tipe, sl, tp = row
+            pair_states[symbol] = {
+                'status': 'IN_LONG' if tipe == 'LONG' else 'IN_SHORT',
+                'level': 0.0,
+                'sl': float(sl),
+                'tp': float(tp)
+            }
+        conn.close()
+        if rows:
+            print(f"📦 Restored {len(rows)} positions")
+    except Exception as e:
+        print(f"❌ Restore error: {e}")
+    
+    # Start Telegram bot thread
+    print("🤖 Starting Telegram bot...")
     tele_thread = threading.Thread(target=run_telegram_bot)
     tele_thread.daemon = True
     tele_thread.start()
-
-    bot.send_message(TELEGRAM_CHAT_ID, f"🤖 *Bot OKX Engine Pro v2.2 Aktif!* 🎉\n\nSistem database SQL adaptif telah terhubung dengan sukses.", parse_mode='Markdown', reply_markup=main_menu_keyboard())
-
+    
+    # Send startup message
+    try:
+        bot.send_message(TELEGRAM_CHAT_ID, 
+            "🤖 *Bot OKX Engine Pro Aktif!* 🎉\n\n"
+            "✅ Mode: Direct API (No CCXT)\n"
+            f"📊 Monitoring: {len(active_pairs)} pairs\n"
+            "💡 Gunakan menu di bawah untuk kontrol.",
+            parse_mode='Markdown',
+            reply_markup=main_menu_keyboard()
+        )
+    except Exception as e:
+        print(f"❌ Startup message error: {e}")
+    
+    # Main loop
+    print("🔄 Starting scan loop...")
     while True:
         for symbol in active_pairs:
-            scan_breakout_retest(symbol)
-            time.sleep(2)
+            try:
+                scan_breakout_retest(symbol)
+                time.sleep(1)
+            except Exception as e:
+                print(f"Loop error {symbol}: {e}")
         time.sleep(10)
+
+def run_telegram_bot():
+    print("✅ Telegram bot running...")
+    bot.infinity_polling()
 
 if __name__ == "__main__":
     main()
