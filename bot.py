@@ -7,6 +7,8 @@ import telebot
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 import psycopg2
 from psycopg2.extras import RealDictCursor
+import requests
+import json
 
 # ==================== CONFIGURATION ====================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -36,10 +38,8 @@ def get_db_connection():
     """Mengembalikan koneksi database yang sesuai (PostgreSQL untuk Railway, SQLite untuk lokal)."""
     if DATABASE_URL:
         import psycopg2
-        # Gunakan PostgreSQL bawaan Railway
         return psycopg2.connect(DATABASE_URL, sslmode='require')
     else:
-        # Gunakan SQLite lokal sebagai fallback
         return sqlite3.connect(DB_FILE)
 
 def init_db():
@@ -103,17 +103,13 @@ def init_db():
         print(f"❌ ERROR INISIALISASI DATABASE: {str(e)}")
 
 def hitung_statistik_performa():
-    """
-    Mengambil data statistik dengan pencarian kata kunci fleksibel (ILIKE)
-    untuk menghindari error format teks dari database.
-    """
+    """Mengambil data statistik dengan pencarian kata kunci fleksibel (ILIKE)"""
     conn = get_db_connection()
     if not conn:
         return None
         
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            # 1. GUNAKAN ILIKE: Mencari potongan kata tanpa sensitif huruf besar/kecil
             cur.execute("""
                 SELECT 
                     COUNT(*) as total,
@@ -124,14 +120,12 @@ def hitung_statistik_performa():
             """)
             stats = cur.fetchone()
             
-            # Jika tabel benar-benar kosong
             if stats['total'] == 0:
                 return "📝 Belum ada data transaksi di database untuk dihitung."
                 
             total_closed = stats['wins'] + stats['losses']
             winrate = (stats['wins'] / total_closed * 100) if total_closed > 0 else 0
             
-            # 2. Kueri Kedua untuk Koin Teraktif dengan ILIKE
             cur.execute("""
                 SELECT symbol, COUNT(*) as qty,
                 COUNT(CASE WHEN result ILIKE '%PROFIT%' OR result ILIKE '%TP%' THEN 1 END) as coin_wins
@@ -143,7 +137,6 @@ def hitung_statistik_performa():
             """)
             top_coins = cur.fetchall()
             
-            # Teks Dashboard Telegram
             laporan = (
                 f"📊 *DASHBOARD STATISTIK TRADING*\n"
                 f"────────────────────────\n"
@@ -164,7 +157,6 @@ def hitung_statistik_performa():
             return laporan
             
     except Exception as e:
-        # Menampilkan detail error asli di log Railway Anda agar mudah dilacak jika ada kolom lain yang salah
         print(f"⚠️ SQL Error Detail: {e}")
         return "❌ Gagal memproses data statistik dari database."
     finally:
@@ -197,7 +189,6 @@ def save_open_trade(symbol, tipe, entry, sl, tp, waktu):
         conn = get_db_connection()
         cursor = conn.cursor()
         if DATABASE_URL:
-            # Syntax Upsert khusus PostgreSQL
             cursor.execute('''
                 INSERT INTO open_trades (symbol, type, entry, sl, tp, time) 
                 VALUES (%s, %s, %s, %s, %s, %s)
@@ -205,7 +196,6 @@ def save_open_trade(symbol, tipe, entry, sl, tp, waktu):
                 DO UPDATE SET type = EXCLUDED.type, entry = EXCLUDED.entry, sl = EXCLUDED.sl, tp = EXCLUDED.tp, time = EXCLUDED.time
             ''', (symbol, tipe, entry, sl, tp, waktu))
         else:
-            # Syntax Upsert khusus SQLite
             cursor.execute(
                 "INSERT OR REPLACE INTO open_trades (symbol, type, entry, sl, tp, time) VALUES (?, ?, ?, ?, ?, ?)",
                 (symbol, tipe, entry, sl, tp, waktu)
@@ -275,10 +265,9 @@ def get_open_trades_dict():
                     if not raw_symbol or entry <= 0 or sl <= 0 or tp <= 0:
                         continue
                     
-                    # Normalisasi symbol - PASTIKAN dalam format BTC-USDT-SWAP
                     symbol = raw_symbol.strip()
                     
-                    # Bersihkan symbol
+                    # Normalisasi symbol ke format BTC-USDT-SWAP
                     if '/' in symbol:
                         parts = symbol.split('/')
                         if len(parts) >= 2:
@@ -296,7 +285,6 @@ def get_open_trades_dict():
                     elif not symbol.endswith('-SWAP'):
                         symbol = f"{symbol}-USDT-SWAP"
                     
-                    # Validasi akhir
                     if symbol and len(symbol) > 3:
                         trades[symbol] = {
                             'type': tipe,
@@ -343,23 +331,159 @@ def get_recent_history(limit=10):
         return []
 
 # =======================================================
+# 📊 OKX API DIRECT FETCH (TANPA CCXT)
+# =======================================================
+
+def fetch_price_from_okx(symbol):
+    """
+    Mengambil harga langsung dari OKX API menggunakan requests
+    """
+    try:
+        if not symbol:
+            return None
+            
+        symbol = str(symbol).strip()
+        if not symbol:
+            return None
+        
+        print(f"DEBUG: Fetching price from OKX API for {symbol}")
+        
+        # Normalisasi symbol ke format OKX API
+        api_symbol = symbol
+        
+        if api_symbol.endswith('-SWAP'):
+            api_symbol = api_symbol.replace('-SWAP', '')
+        elif '/' in api_symbol:
+            parts = api_symbol.split('/')
+            if len(parts) >= 2:
+                api_symbol = f"{parts[0].strip()}-{parts[1].strip().replace(':USDT', '')}"
+        
+        print(f"DEBUG: API symbol: {api_symbol}")
+        
+        # Method 1: Coba endpoint ticker
+        try:
+            url = f"https://www.okx.com/api/v5/market/ticker?instId={api_symbol}"
+            print(f"DEBUG: Requesting {url}")
+            
+            response = requests.get(url, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                print(f"DEBUG: Response received")
+                
+                if data.get('code') == '0' and data.get('data'):
+                    ticker_data = data['data'][0]
+                    price = None
+                    
+                    for field in ['last', 'close', 'bidPx', 'askPx']:
+                        if field in ticker_data and ticker_data[field]:
+                            try:
+                                price = float(ticker_data[field])
+                                if price > 0:
+                                    print(f"✅ Got price from '{field}': {price}")
+                                    return price
+                            except:
+                                continue
+            else:
+                print(f"⚠️ HTTP Error: {response.status_code}")
+        except Exception as e:
+            print(f"⚠️ Ticker API error: {e}")
+        
+        # Method 2: Coba endpoint OHLCV
+        try:
+            url = f"https://www.okx.com/api/v5/market/candles?instId={api_symbol}&bar=1m&limit=2"
+            print(f"DEBUG: Requesting {url}")
+            
+            response = requests.get(url, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                
+                if data.get('code') == '0' and data.get('data'):
+                    candles = data['data']
+                    if candles and len(candles) > 0:
+                        last_candle = candles[-1]
+                        if len(last_candle) >= 5:
+                            try:
+                                price = float(last_candle[4])
+                                if price > 0:
+                                    print(f"✅ Got price from OHLCV: {price}")
+                                    return price
+                            except:
+                                pass
+            else:
+                print(f"⚠️ OHLCV HTTP Error: {response.status_code}")
+        except Exception as e:
+            print(f"⚠️ OHLCV API error: {e}")
+        
+        # Method 3: Coba dengan symbol asli (dengan -SWAP)
+        if not api_symbol.endswith('-SWAP'):
+            try:
+                alt_symbol = f"{api_symbol}-SWAP"
+                url = f"https://www.okx.com/api/v5/market/ticker?instId={alt_symbol}"
+                print(f"DEBUG: Trying alternative: {alt_symbol}")
+                
+                response = requests.get(url, timeout=10)
+                if response.status_code == 200:
+                    data = response.json()
+                    if data.get('code') == '0' and data.get('data'):
+                        ticker_data = data['data'][0]
+                        for field in ['last', 'close', 'bidPx', 'askPx']:
+                            if field in ticker_data and ticker_data[field]:
+                                try:
+                                    price = float(ticker_data[field])
+                                    if price > 0:
+                                        print(f"✅ Got price from alternative '{field}': {price}")
+                                        return price
+                                except:
+                                    continue
+            except Exception as e:
+                print(f"⚠️ Alternative API error: {e}")
+        
+        print(f"❌ No price found for {symbol}")
+        return None
+        
+    except Exception as e:
+        print(f"❌ Error in fetch_price_from_okx: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+def safe_fetch_ticker(symbol):
+    """
+    Mengambil ticker dengan error handling yang aman
+    """
+    try:
+        if not symbol:
+            return None
+            
+        symbol = str(symbol).strip()
+        if not symbol:
+            return None
+            
+        print(f"DEBUG: safe_fetch_ticker for {symbol}")
+        
+        price = fetch_price_from_okx(symbol)
+        
+        if price and price > 0:
+            return {'price': price}
+        else:
+            return None
+            
+    except Exception as e:
+        print(f"❌ Error in safe_fetch_ticker: {e}")
+        return None
+
+# =======================================================
 # 🌐 ENGINE PRO INITIALIZATION
 # =======================================================
 
 print("Menghubungi OKX API...")
 
-# Hapus exchange yang sudah ada
-try:
-    exchange = None
-except:
-    pass
-
 # Inisialisasi exchange dengan konfigurasi yang lebih baik
 exchange = ccxt.okx({
-    'apiKey': '',  # Biarkan kosong untuk public access
+    'apiKey': '',
     'secret': '',
     'options': {
-        'defaultType': 'swap',  # Futures/Perpetual
+        'defaultType': 'swap',
         'adjustForTimeDifference': True,
     },
     'enableRateLimit': True,
@@ -369,7 +493,7 @@ exchange = ccxt.okx({
 # Load markets dengan retry
 print("🔄 Loading markets from OKX...")
 loaded = False
-for attempt in range(5):  # 5 attempts
+for attempt in range(5):
     try:
         print(f"  Attempt {attempt + 1}/5...")
         exchange.load_markets()
@@ -384,7 +508,6 @@ for attempt in range(5):  # 5 attempts
 
 if not loaded:
     print("⚠️ Gagal load markets dari OKX. Menggunakan fallback manual...")
-    # Buat markets dummy untuk menghindari error
     exchange.markets = {}
 
 # Ambil daftar pair yang valid
@@ -398,7 +521,6 @@ if loaded and exchange.markets:
         ]
         
         if futures_markets:
-            # Sort by volume
             futures_markets.sort(
                 key=lambda x: float(x['info'].get('vol24h', 0)) if x.get('info') and 'vol24h' in x['info'] else 0, 
                 reverse=True
@@ -432,10 +554,8 @@ print("=" * 50)
 
 # --- MATH METRICS CALCULATORS ---
 def calculate_ema(prices, period=200):
-    """Menghitung EMA, mengembalikan 0.0 jika data tidak cukup"""
     if not prices or len(prices) < period:
         return 0.0
-    
     k = 2 / (period + 1)
     ema = prices[0]
     for price in prices[1:]:
@@ -443,39 +563,27 @@ def calculate_ema(prices, period=200):
     return ema
 
 def calculate_rsi(prices, period=14):
-    """Menghitung RSI, mengembalikan 50.0 jika data tidak cukup"""
     if not prices or len(prices) < period + 1:
         return 50.0
-    
     gains, losses = [], []
     for i in range(1, len(prices)):
         change = prices[i] - prices[i-1]
         gains.append(change if change > 0 else 0.0)
         losses.append(abs(change) if change < 0 else 0.0)
-    
     avg_gain = sum(gains[:period]) / period
     avg_loss = sum(losses[:period]) / period
-    
     if avg_loss == 0:
         return 100.0
-    
     for i in range(period, len(gains)):
         avg_gain = (avg_gain * (period - 1) + gains[i]) / period
         avg_loss = (avg_loss * (period - 1) + losses[i]) / period
-    
     if avg_loss == 0:
         return 100.0
-    
     return 100.0 - (100.0 / (1.0 + (avg_gain / avg_loss)))
 
 def calculate_atr(candles, period=14):
-    """
-    Hitung ATR (Average True Range) dari data candle OHLCV.
-    Mengembalikan 0.0 jika data tidak cukup.
-    """
     if not candles or len(candles) < period + 1:
         return 0.0
-    
     true_ranges = []
     for i in range(1, len(candles)):
         try:
@@ -489,161 +597,27 @@ def calculate_atr(candles, period=14):
         except Exception as e:
             print(f"Error calculating ATR: {e}")
             continue
-    
     if len(true_ranges) < period:
         return 0.0
-    
     return sum(true_ranges[-period:]) / period
 
 def get_atr_sl(candles, invalidation, trade_type, atr_multiplier=1.5, fallback_pct=0.5):
-    """
-    Hitung SL berbasis ATR.
-    Selalu return tuple (float, str)
-    """
     if not candles or len(candles) < 15:
         fallback = invalidation * (1 - fallback_pct/100) if trade_type == 'LONG' else invalidation * (1 + fallback_pct/100)
         return fallback, "flat"
-    
     atr = calculate_atr(candles, period=14)
-    
     if trade_type == 'LONG':
         sl_flat = invalidation * (1 - fallback_pct / 100)
         if atr <= 0:
             return sl_flat, "flat"
         sl_atr = invalidation - atr * atr_multiplier
         return min(sl_atr, sl_flat), "ATR"
-    else:  # SHORT
+    else:
         sl_flat = invalidation * (1 + fallback_pct / 100)
         if atr <= 0:
             return sl_flat, "flat"
         sl_atr = invalidation + atr * atr_multiplier
         return max(sl_atr, sl_flat), "ATR"
-
-def fetch_price_direct(symbol):
-    """
-    Mengambil harga langsung dari OKX tanpa bergantung pada exchange.markets
-    """
-    try:
-        if not symbol:
-            return None
-            
-        symbol = str(symbol).strip()
-        if not symbol:
-            return None
-            
-        print(f"DEBUG: Fetching price for {symbol}")
-        
-        # Normalisasi symbol ke format yang benar
-        if '/' in symbol:
-            parts = symbol.split('/')
-            if len(parts) >= 2:
-                base = parts[0].strip()
-                if base:
-                    symbol = f"{base}-USDT-SWAP"
-        elif not symbol.endswith('-SWAP') and 'USDT' in symbol:
-            if '-' in symbol:
-                if not symbol.endswith('-SWAP'):
-                    symbol = f"{symbol}-SWAP"
-            else:
-                base = symbol.replace('USDT', '').strip()
-                if base:
-                    symbol = f"{base}-USDT-SWAP"
-                else:
-                    symbol = f"{symbol}-USDT-SWAP"
-        
-        print(f"DEBUG: Normalized symbol: {symbol}")
-        
-        # Method 1: Coba fetch_ohlcv (paling reliable)
-        try:
-            print(f"DEBUG: Trying OHLCV for {symbol}")
-            ohlcv = exchange.fetch_ohlcv(symbol, timeframe='1m', limit=2)
-            if ohlcv and len(ohlcv) > 0:
-                last_candle = ohlcv[-1]
-                if last_candle and len(last_candle) >= 5:
-                    price = float(last_candle[4])  # Close price
-                    if price > 0:
-                        print(f"✅ Got price from OHLCV: {price}")
-                        return price
-        except Exception as e:
-            print(f"⚠️ OHLCV error: {e}")
-            
-            # Coba dengan format berbeda jika error
-            try:
-                alt_symbols = [
-                    symbol.replace('-SWAP', ''),
-                    symbol.replace('-USDT-SWAP', '/USDT:USDT'),
-                    symbol.replace('-USDT-SWAP', ''),
-                ]
-                for alt in alt_symbols:
-                    if alt == symbol:
-                        continue
-                    try:
-                        print(f"DEBUG: Trying OHLCV with {alt}")
-                        ohlcv = exchange.fetch_ohlcv(alt, timeframe='1m', limit=2)
-                        if ohlcv and len(ohlcv) > 0:
-                            last_candle = ohlcv[-1]
-                            if last_candle and len(last_candle) >= 5:
-                                price = float(last_candle[4])
-                                if price > 0:
-                                    print(f"✅ Got price from OHLCV ({alt}): {price}")
-                                    return price
-                    except:
-                        continue
-            except Exception as e2:
-                print(f"⚠️ Alternative OHLCV error: {e2}")
-        
-        # Method 2: Coba fetch_ticker
-        try:
-            print(f"DEBUG: Trying ticker for {symbol}")
-            ticker = exchange.fetch_ticker(symbol)
-            if ticker:
-                # Coba berbagai field
-                for field in ['last', 'close', 'bid', 'ask']:
-                    if field in ticker and ticker[field] is not None:
-                        try:
-                            price = float(ticker[field])
-                            if price > 0:
-                                print(f"✅ Got price from ticker '{field}': {price}")
-                                return price
-                        except:
-                            continue
-        except Exception as e:
-            print(f"⚠️ Ticker error: {e}")
-        
-        print(f"❌ No price found for {symbol}")
-        return None
-        
-    except Exception as e:
-        print(f"❌ Error in fetch_price_direct: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
-
-def safe_fetch_ticker(symbol):
-    """
-    Mengambil ticker dengan error handling yang aman
-    """
-    try:
-        if not symbol:
-            return None
-            
-        symbol = str(symbol).strip()
-        if not symbol:
-            return None
-            
-        print(f"DEBUG: safe_fetch_ticker for {symbol}")
-        
-        # Gunakan fungsi direct
-        price = fetch_price_direct(symbol)
-        
-        if price and price > 0:
-            return {'price': price}
-        else:
-            return None
-            
-    except Exception as e:
-        print(f"❌ Error in safe_fetch_ticker: {e}")
-        return None
 
 def run_telegram_bot():
     print("Telegram Command Listener aktif...")
@@ -651,7 +625,6 @@ def run_telegram_bot():
 
 # --- KEYBOARDS ---
 def main_menu_keyboard():
-    """Membuat keyboard dengan emoji yang tepat"""
     markup = ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
     btn1 = KeyboardButton("🔍 Pantauan Koin")
     btn2 = KeyboardButton("🎯 Setup Aktif (/pola)")
@@ -674,151 +647,47 @@ def pairs_category_keyboard():
 # --- TELEGRAM TEXT HANDLERS ---
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
-    db_type = "PostgreSQL" if DATABASE_URL else "SQLite"
-    welcome_text = (
-        f"👋 *Selamat datang di Dashboard OKX Futures Pro Engine (Adaptive Db Ver.)!*\n\n"
-        f"Gunakan tombol *Reply Keyboard* di bagian bawah layar Anda untuk bernavigasi."
-    )
-    bot.send_message(message.chat.id, welcome_text, parse_mode='Markdown')
+    bot.send_message(message.chat.id, 
+        f"👋 *Selamat datang di Dashboard OKX Futures Pro Engine!*\n\n"
+        f"Gunakan tombol *Reply Keyboard* di bagian bawah layar Anda untuk bernavigasi.",
+        parse_mode='Markdown')
 
-@bot.message_handler(commands=['debug_symbol'])
-def debug_symbol_command(message):
-    """Debug untuk cek symbol di database"""
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        if DATABASE_URL:
-            cursor.execute("SELECT symbol, type, entry FROM open_trades")
-        else:
-            cursor.execute("SELECT symbol, type, entry FROM open_trades")
-            
-        rows = cursor.fetchall()
-        conn.close()
-        
-        if not rows:
-            bot.reply_to(message, "📭 *Tabel open_trades kosong*", parse_mode='Markdown')
-            return
-            
-        text = "🔍 *DEBUG SYMBOL DI DATABASE:*\n━━━━━━━━━━━━━━━━━━━━━\n"
-        for row in rows:
-            symbol = row[0] if row[0] else 'None'
-            tipe = row[1] if row[1] else 'None'
-            entry = row[2] if row[2] else 'None'
-            text += f"Symbol: `{symbol}` | Type: {tipe} | Entry: {entry}\n"
-            
-        bot.reply_to(message, text, parse_mode='Markdown')
-        
-    except Exception as e:
-        bot.reply_to(message, f"❌ Error: `{str(e)}`", parse_mode='Markdown')
-
-@bot.message_handler(commands=['test_open'])
-def test_open_positions(message):
-    """Command test untuk cek fungsi open positions"""
-    try:
-        print("DEBUG: test_open_positions dipanggil")
-        
-        # Coba ambil data langsung
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        if DATABASE_URL:
-            cursor.execute("SELECT * FROM open_trades")
-        else:
-            cursor.execute("SELECT * FROM open_trades")
-            
-        rows = cursor.fetchall()
-        conn.close()
-        
-        if not rows:
-            bot.reply_to(message, "📭 *Tabel open_trades kosong*", parse_mode='Markdown')
-            return
-            
-        # Kirim raw data
-        text = "🔍 *RAW DATA OPEN_TRADES:*\n━━━━━━━━━━━━━━━━━━━━━\n"
-        for row in rows:
-            text += f"`{row}`\n"
-            
-        # Coba panggil fungsi get_open_trades_dict
-        dict_data = get_open_trades_dict()
-        text += f"\n📊 *Dictionary result:*\n`{dict_data}`"
-        
-        bot.reply_to(message, text, parse_mode='Markdown')
-        
-    except Exception as e:
-        bot.reply_to(message, f"❌ Error: `{str(e)}`", parse_mode='Markdown')
-
-@bot.message_handler(commands=['test_exchange'])
-def test_exchange_command(message):
-    """Test koneksi ke exchange"""
-    try:
-        text = "🔍 *TESTING EXCHANGE CONNECTION*\n━━━━━━━━━━━━━━━━━━━━━\n"
-        
-        # Cek markets
-        if exchange.markets:
-            text += f"✅ Markets loaded: {len(exchange.markets)}\n"
-            text += f"✅ Sample markets: {list(exchange.markets.keys())[:5]}\n\n"
-        else:
-            text += "❌ Markets NOT loaded!\n\n"
-        
-        # Coba fetch ticker untuk BTC
-        try:
-            text += "📊 *Testing BTC-USDT-SWAP:*\n"
-            ticker = exchange.fetch_ticker('BTC-USDT-SWAP')
-            if ticker:
-                text += f"  Last: {ticker.get('last', 'N/A')}\n"
-                text += f"  Bid: {ticker.get('bid', 'N/A')}\n"
-                text += f"  Ask: {ticker.get('ask', 'N/A')}\n"
-            else:
-                text += "  ❌ No ticker data\n"
-        except Exception as e:
-            text += f"  ❌ Error: {str(e)[:100]}\n"
-        
-        # Coba fetch OHLCV
-        try:
-            text += "\n📊 *Testing OHLCV:*\n"
-            ohlcv = exchange.fetch_ohlcv('BTC-USDT-SWAP', timeframe='1m', limit=2)
-            if ohlcv and len(ohlcv) > 0:
-                last = ohlcv[-1]
-                text += f"  Close: {last[4]}\n"
-            else:
-                text += "  ❌ No OHLCV data\n"
-        except Exception as e:
-            text += f"  ❌ Error: {str(e)[:100]}\n"
-        
-        bot.reply_to(message, text, parse_mode='Markdown')
-        
-    except Exception as e:
-        bot.reply_to(message, f"❌ Error: `{str(e)}`", parse_mode='Markdown')
-
-@bot.message_handler(commands=['test_price3'])
-def test_price3_command(message):
-    """Test harga dengan direct fetch"""
+@bot.message_handler(commands=['test_api'])
+def test_api_command(message):
+    """Test API OKX langsung"""
     try:
         args = message.text.split()
         if len(args) < 2:
-            bot.reply_to(message, "⚠️ Format: `/test_price3 <SYMBOL>`\nContoh: `/test_price3 BTC`", parse_mode='Markdown')
+            bot.reply_to(message, "⚠️ Format: `/test_api <SYMBOL>`\nContoh: `/test_api BTC`", parse_mode='Markdown')
             return
             
         coin = args[1].upper().strip()
-        symbol = f"{coin}-USDT-SWAP"
+        symbols = [
+            f"{coin}-USDT",
+            f"{coin}/USDT:USDT",
+            f"{coin}USDT",
+            f"{coin}-USDT-SWAP"
+        ]
         
-        bot.reply_to(message, f"⏳ _Mengambil harga untuk {symbol}..._", parse_mode='Markdown')
+        results = []
+        results.append(f"🔍 *TESTING API OKX UNTUK {coin}*\n━━━━━━━━━━━━━━━━━━━━━\n")
         
-        # Coba direct fetch
-        price = fetch_price_direct(symbol)
+        for sym in symbols:
+            results.append(f"📊 *Symbol: {sym}*")
+            price = fetch_price_from_okx(sym)
+            if price and price > 0:
+                results.append(f"  ✅ Price: `{price:.4f}`")
+            else:
+                results.append(f"  ❌ No price found")
+            results.append("")
         
-        if price and price > 0:
-            bot.reply_to(message, f"✅ *Harga {symbol}:*\n`{price:.4f}`", parse_mode='Markdown')
-        else:
-            bot.reply_to(message, f"❌ *Gagal mengambil harga untuk {symbol}*", parse_mode='Markdown')
-            
+        bot.reply_to(message, "\n".join(results), parse_mode='Markdown')
+        
     except Exception as e:
         bot.reply_to(message, f"❌ Error: `{str(e)}`", parse_mode='Markdown')
 
 @bot.message_handler(commands=['statistik', 'stats'])
 def send_statistics(message):
-    """Handler Telegram untuk merespons perintah /statistik."""
     bot.send_chat_action(message.chat.id, 'typing')
     hasil_laporan = hitung_statistik_performa()
     if hasil_laporan:
@@ -841,7 +710,7 @@ def handle_backtest_command(message):
         candles = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME_LIVE, limit=500)
         
         if not candles or len(candles) < 205:
-            bot.reply_to(message, f"❌ Data transaksi historis untuk `{symbol}` tidak mencukupi (Minimal butuh 205 candle).", parse_mode='Markdown')
+            bot.reply_to(message, f"❌ Data transaksi historis untuk `{symbol}` tidak mencukupi.", parse_mode='Markdown')
             return
 
         total_trades, wins, losses = 0, 0, 0
@@ -944,90 +813,25 @@ def handle_backtest_command(message):
     except Exception as e:
         try: bot.delete_message(message.chat.id, loading_msg.message_id)
         except: pass
-        bot.reply_to(message, f"❌ *Gagal memproses backtest.*\nDetail Kendala: `{str(e)}`", parse_mode='Markdown')
-
-@bot.message_handler(commands=['debug_db'])
-def debug_database(message):
-    """Command untuk debug isi database"""
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        if DATABASE_URL:
-            cursor.execute("SELECT * FROM open_trades")
-        else:
-            cursor.execute("SELECT * FROM open_trades")
-            
-        rows = cursor.fetchall()
-        
-        if not rows:
-            bot.reply_to(message, "📭 *Tabel open_trades kosong*", parse_mode='Markdown')
-        else:
-            text = "📊 *ISI TABEL OPEN_TRADES:*\n━━━━━━━━━━━━━━━━━━━━━\n"
-            for row in rows:
-                text += f"`{row}`\n"
-            bot.reply_to(message, text, parse_mode='Markdown')
-            
-        conn.close()
-        
-    except Exception as e:
-        bot.reply_to(message, f"❌ *Debug error:* `{str(e)}`", parse_mode='Markdown')
-
-@bot.message_handler(commands=['debug_open'])
-def debug_open_positions(message):
-    """Debug detail isi open_trades"""
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        if DATABASE_URL:
-            cursor.execute("SELECT * FROM open_trades")
-        else:
-            cursor.execute("SELECT * FROM open_trades")
-            
-        rows = cursor.fetchall()
-        conn.close()
-        
-        if not rows:
-            bot.reply_to(message, "📭 *Tabel open_trades kosong*", parse_mode='Markdown')
-            return
-            
-        text = "🔍 *DEBUG OPEN_TRADES:*\n━━━━━━━━━━━━━━━━━━━━━\n"
-        text += f"Total rows: {len(rows)}\n\n"
-        
-        for i, row in enumerate(rows, 1):
-            text += f"Row {i}: `{row}`\n"
-            if i >= 10:
-                text += "... (dan seterusnya)\n"
-                break
-                
-        bot.reply_to(message, text, parse_mode='Markdown')
-        
-    except Exception as e:
-        bot.reply_to(message, f"❌ Debug error: `{str(e)}`", parse_mode='Markdown')
+        bot.reply_to(message, f"❌ *Gagal memproses backtest.*\nDetail: `{str(e)}`", parse_mode='Markdown')
 
 @bot.message_handler(func=lambda msg: True)
 def handle_reply_keyboard(message):
     text = message.text
-    print(f"DEBUG: Keyboard clicked: {text}")  # Log untuk debug
+    print(f"DEBUG: Keyboard clicked: {text}")
     
     if text == "🔍 Pantauan Koin":
         bot.send_message(message.chat.id, "📂 *Silakan pilih kategori koin:*", parse_mode='Markdown', reply_markup=pairs_category_keyboard())
     elif text == "🎯 Setup Aktif (/pola)":
         send_active_patterns(message)
     elif text == "📊 Posisi Open":
-        print("DEBUG: Memproses Posisi Open")  # Log
         try:
             send_open_positions(message)
         except Exception as e:
-            print(f"❌ Error di handler Posisi Open: {e}")  # Log
+            print(f"❌ Error: {e}")
             import traceback
             traceback.print_exc()
-            bot.reply_to(
-                message,
-                f"❌ *Error saat menampilkan posisi:*\n`{str(e)}`",
-                parse_mode='Markdown'
-            )
+            bot.reply_to(message, f"❌ *Error:* `{str(e)}`", parse_mode='Markdown')
     elif text == "📜 Histori Trade":
         send_trade_history(message)
     elif text == "🤖 Status Sistem":
@@ -1102,10 +906,10 @@ def send_open_positions(message):
                     error_count += 1
                     continue
                 
-                # Ambil harga terkini - Direct fetch
+                # Ambil harga terkini dari OKX API langsung
                 current_price = entry_price
                 try:
-                    price = fetch_price_direct(clean_symbol)
+                    price = fetch_price_from_okx(clean_symbol)
                     if price and price > 0:
                         current_price = price
                         print(f"✅ Price found for {clean_symbol}: {current_price}")
@@ -1177,13 +981,11 @@ def send_open_positions(message):
         bot.reply_to(message, f"❌ Error: `{str(e)}`", parse_mode='Markdown')
 
 def send_trade_history(message):
-    """Menampilkan histori trade dengan split jika terlalu panjang"""
     history = get_recent_history(10)
     if not history:
         bot.send_message(message.chat.id, "📜 *Belum ada histori transaksi di database.*", parse_mode='Markdown')
         return
     
-    # Buat list pesan
     messages = []
     current_message = f"📜 *RIWAYAT TRANSAKSI TERAKHIR ({len(history)}):*\n━━━━━━━━━━━━━━━━━━━━━\n"
     
@@ -1214,7 +1016,6 @@ def send_trade_history(message):
                 f"━━━━━━━━━━━━━━━━━━━━━\n"
             )
             
-            # Cek jika menambahkan pos_text akan melebihi batas
             if len(current_message) + len(pos_text) > 4000:
                 messages.append(current_message)
                 current_message = f"📜 *RIWAYAT TRANSAKSI (LANJUTAN):*\n━━━━━━━━━━━━━━━━━━━━━\n"
@@ -1225,11 +1026,9 @@ def send_trade_history(message):
             print(f"Error processing history item: {e}")
             continue
     
-    # Tambahkan pesan terakhir
     if current_message and current_message != f"📜 *RIWAYAT TRANSAKSI TERAKHIR ({len(history)}):*\n━━━━━━━━━━━━━━━━━━━━━\n":
         messages.append(current_message)
     
-    # Kirim semua pesan
     for msg in messages:
         bot.send_message(message.chat.id, msg, parse_mode='Markdown')
 
@@ -1253,11 +1052,9 @@ def handle_category_selection(call):
 def scan_breakout_retest(symbol):
     global pair_states
     try:
-        # Validasi awal
         if not symbol:
             return
             
-        # Ambil data dengan error handling
         try:
             candles = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME_LIVE, limit=100)
         except Exception as e:
@@ -1268,7 +1065,6 @@ def scan_breakout_retest(symbol):
             print(f"Data tidak cukup untuk {symbol}: {len(candles)} candles")
             return
 
-        # Pastikan semua data candle valid
         for candle in candles:
             if not candle or len(candle) < 6:
                 print(f"Data candle tidak valid untuk {symbol}")
@@ -1287,7 +1083,7 @@ def scan_breakout_retest(symbol):
 
         waktu_sekarang = time.strftime("%H:%M:%S")
 
-        # Monitoring Jika Berstatus LONG
+        # Monitoring LONG
         if pair_states[symbol]['status'] == 'IN_LONG':
             sl_level = pair_states[symbol]['sl']
             tp_level = pair_states[symbol]['tp']
@@ -1313,7 +1109,7 @@ def scan_breakout_retest(symbol):
             else:
                 return
 
-        # Monitoring Jika Berstatus SHORT
+        # Monitoring SHORT
         if pair_states[symbol]['status'] == 'IN_SHORT':
             sl_level = pair_states[symbol]['sl']
             tp_level = pair_states[symbol]['tp']
@@ -1339,7 +1135,7 @@ def scan_breakout_retest(symbol):
             else:
                 return
 
-        # Analisis Sinyal Teknis (Confirmed Breakout & Retest)
+        # Analisis Sinyal Teknis
         try:
             macro_candles = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME_MACRO, limit=205)
             macro_closes = [c[4] for c in macro_candles]
@@ -1426,7 +1222,7 @@ def scan_breakout_retest(symbol):
                     
                 bot.send_message(TELEGRAM_CHAT_ID, f"🎯 *RETEST SUCCESS (ENTRY SHORT)*\n\nPair: `{symbol.replace('-USDT-SWAP', '')}`\n📥 Entry: `{current_close:.4f}`\n🛑 SL: `{stop_loss:.4f}` ({sl_method}, {atr_info})\n🎯 TP: `{take_profit:.4f}`", parse_mode='Markdown')
 
-        # Reset jika breakout gagal (gunakan variabel yang sudah didefinisikan)
+        # Reset jika breakout gagal
         if pair_states[symbol]['status'] == 'BREAKOUT_BULLISH':
             target_res = pair_states[symbol]['level']
             if current_close < target_res * 0.995:
@@ -1437,12 +1233,10 @@ def scan_breakout_retest(symbol):
                 pair_states[symbol] = {'status': 'NONE', 'level': 0.0, 'sl': 0.0, 'tp': 0.0}
 
     except Exception as e:
-        # Log error dengan detail
         print(f"Error scan {symbol}: {str(e)}")
         import traceback
         traceback.print_exc()
         
-        # Reset state jika terjadi error (kecuali dalam posisi)
         if symbol in pair_states:
             if pair_states[symbol]['status'] not in ['IN_LONG', 'IN_SHORT']:
                 pair_states[symbol] = {'status': 'NONE', 'level': 0.0, 'sl': 0.0, 'tp': 0.0}
