@@ -208,6 +208,29 @@ def get_recent_history(limit=10):
         print(f"❌ History read error: {e}")
         return []
 
+def get_all_history():
+    """Mengambil semua histori trade untuk perhitungan winrate"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        if DATABASE_URL:
+            cursor.execute("SELECT symbol, type, entry, exit, result, closed_at FROM trade_history ORDER BY id DESC")
+        else:
+            cursor.execute("SELECT symbol, type, entry, exit, result, closed_at FROM trade_history ORDER BY id DESC")
+        rows = cursor.fetchall()
+        conn.close()
+        history_list = []
+        for row in rows:
+            symbol, tipe, entry, exit_price, result, closed_at = row
+            history_list.append({
+                'symbol': symbol, 'type': tipe, 'entry': float(entry), 
+                'exit': float(exit_price), 'result': result, 'closed_at': closed_at
+            })
+        return history_list
+    except Exception as e:
+        print(f"❌ History read error: {e}")
+        return []
+
 # =======================================================
 # 📊 OKX API DIRECT FETCH (TANPA CCXT)
 # =======================================================
@@ -222,7 +245,6 @@ def fetch_ohlcv_from_okx(symbol, timeframe='15m', limit=100):
         if not symbol:
             return None
         
-        # Normalize symbol
         api_symbol = symbol
         if api_symbol.endswith('-SWAP'):
             api_symbol = api_symbol.replace('-SWAP', '')
@@ -231,7 +253,6 @@ def fetch_ohlcv_from_okx(symbol, timeframe='15m', limit=100):
             if len(parts) >= 2:
                 api_symbol = f"{parts[0].strip()}-{parts[1].strip().replace(':USDT', '')}"
         
-        # Map timeframe
         bar_map = {
             '1m': '1m', '3m': '3m', '5m': '5m', '15m': '15m', '30m': '30m',
             '1h': '1H', '2h': '2H', '4h': '4H', '6h': '6H', '12h': '12H',
@@ -240,14 +261,12 @@ def fetch_ohlcv_from_okx(symbol, timeframe='15m', limit=100):
         bar = bar_map.get(timeframe, '15m')
         
         url = f"https://www.okx.com/api/v5/market/candles?instId={api_symbol}&bar={bar}&limit={limit}"
-        print(f"DEBUG: Fetching OHLCV: {url}")
         
         response = requests.get(url, timeout=15)
         if response.status_code == 200:
             data = response.json()
             if data.get('code') == '0' and data.get('data'):
                 candles = data['data']
-                # Convert to ccxt format: [timestamp, open, high, low, close, volume]
                 result = []
                 for candle in candles:
                     if len(candle) >= 6:
@@ -258,14 +277,9 @@ def fetch_ohlcv_from_okx(symbol, timeframe='15m', limit=100):
                         close = float(candle[4])
                         volume = float(candle[5])
                         result.append([ts, open_price, high, low, close, volume])
-                # Reverse to get ascending order (oldest first)
                 result.reverse()
-                print(f"✅ Got {len(result)} candles for {symbol}")
                 return result
-        else:
-            print(f"⚠️ HTTP Error: {response.status_code}")
-            return None
-            
+        return None
     except Exception as e:
         print(f"❌ fetch_ohlcv error: {e}")
         return None
@@ -287,7 +301,6 @@ def fetch_price_from_okx(symbol):
             if len(parts) >= 2:
                 api_symbol = f"{parts[0].strip()}-{parts[1].strip().replace(':USDT', '')}"
         
-        # Try ticker endpoint
         try:
             url = f"https://www.okx.com/api/v5/market/ticker?instId={api_symbol}"
             response = requests.get(url, timeout=10)
@@ -306,7 +319,6 @@ def fetch_price_from_okx(symbol):
         except Exception as e:
             print(f"⚠️ Ticker API error: {e}")
         
-        # Try OHLCV endpoint
         try:
             url = f"https://www.okx.com/api/v5/market/candles?instId={api_symbol}&bar=1m&limit=2"
             response = requests.get(url, timeout=10)
@@ -399,27 +411,95 @@ def get_atr_sl(candles, invalidation, trade_type, atr_multiplier=1.5, fallback_p
         return max(sl_atr, sl_flat), "ATR"
 
 # =======================================================
+# 📊 WINRATE CALCULATOR
+# =======================================================
+
+def calculate_winrate():
+    """Menghitung winrate dari semua histori trade yang sudah close"""
+    history = get_all_history()
+    
+    if not history:
+        return None, None, None, None
+    
+    total = len(history)
+    wins = sum(1 for t in history if t['result'] in ['TP', 'WIN', 'PROFIT'])
+    losses = sum(1 for t in history if t['result'] in ['SL', 'LOSS'])
+    
+    # Hitung profit/loss per trade
+    total_profit = 0
+    total_loss = 0
+    profit_trades = []
+    loss_trades = []
+    
+    for trade in history:
+        if trade['type'] == 'LONG':
+            pnl_pct = ((trade['exit'] - trade['entry']) / trade['entry']) * 100
+        else:
+            pnl_pct = ((trade['entry'] - trade['exit']) / trade['entry']) * 100
+        
+        if trade['result'] in ['TP', 'WIN', 'PROFIT']:
+            total_profit += pnl_pct
+            profit_trades.append(pnl_pct)
+        else:
+            total_loss += abs(pnl_pct)
+            loss_trades.append(pnl_pct)
+    
+    winrate = (wins / total * 100) if total > 0 else 0
+    
+    # Hitung statistik tambahan
+    avg_profit = total_profit / wins if wins > 0 else 0
+    avg_loss = total_loss / losses if losses > 0 else 0
+    profit_factor = total_profit / total_loss if total_loss > 0 else 0
+    net_profit = total_profit - total_loss
+    
+    # Cari best dan worst trade
+    best_trade = max(profit_trades) if profit_trades else 0
+    worst_trade = min(loss_trades) if loss_trades else 0
+    
+    # Hitung per koin
+    coin_stats = {}
+    for trade in history:
+        coin = trade['symbol'].replace('-USDT-SWAP', '').replace('-SWAP', '')
+        if coin not in coin_stats:
+            coin_stats[coin] = {'wins': 0, 'losses': 0, 'total': 0}
+        coin_stats[coin]['total'] += 1
+        if trade['result'] in ['TP', 'WIN', 'PROFIT']:
+            coin_stats[coin]['wins'] += 1
+        else:
+            coin_stats[coin]['losses'] += 1
+    
+    # Sort coin by winrate
+    for coin in coin_stats:
+        coin_stats[coin]['winrate'] = (coin_stats[coin]['wins'] / coin_stats[coin]['total'] * 100) if coin_stats[coin]['total'] > 0 else 0
+    
+    top_coins = sorted(coin_stats.items(), key=lambda x: x[1]['wins'], reverse=True)[:5]
+    
+    return {
+        'total': total,
+        'wins': wins,
+        'losses': losses,
+        'winrate': winrate,
+        'avg_profit': avg_profit,
+        'avg_loss': avg_loss,
+        'profit_factor': profit_factor,
+        'net_profit': net_profit,
+        'best_trade': best_trade,
+        'worst_trade': worst_trade,
+        'top_coins': top_coins
+    }
+
+# =======================================================
 # 🤖 TELEGRAM BOT
 # =======================================================
 
 def main_menu_keyboard():
     markup = ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
     markup.add(
-        KeyboardButton("🔍 Pantauan Koin"),
-        KeyboardButton("🎯 Setup Aktif (/pola)"),
+        KeyboardButton("🎯 Setup Aktif"),
         KeyboardButton("📊 Posisi Open"),
         KeyboardButton("📜 Histori Trade"),
+        KeyboardButton("📈 Winrate"),
         KeyboardButton("🤖 Status Sistem")
-    )
-    return markup
-
-def pairs_category_keyboard():
-    markup = InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        InlineKeyboardButton("🔥 Top 50 Vol Teraktif", callback_data="cat_top50"),
-        InlineKeyboardButton("💎 Koin Majors", callback_data="cat_majors"),
-        InlineKeyboardButton("🌐 Layer 1", callback_data="cat_l1"),
-        InlineKeyboardButton("🚀 Meme & Alts", callback_data="cat_memes")
     )
     return markup
 
@@ -427,8 +507,69 @@ def pairs_category_keyboard():
 def send_welcome(message):
     bot.send_message(message.chat.id, 
         "👋 *Selamat datang di Dashboard OKX Futures Pro Engine!*\n\n"
-        "Gunakan tombol *Reply Keyboard* di bagian bawah layar.",
+        "Gunakan tombol *Reply Keyboard* di bagian bawah layar.\n\n"
+        "📌 *Fitur:*\n"
+        "• 🎯 Setup Aktif - Lihat sinyal yang menunggu\n"
+        "• 📊 Posisi Open - Lihat posisi aktif\n"
+        "• 📜 Histori Trade - Riwayat transaksi\n"
+        "• 📈 Winrate - Statistik akurasi sinyal\n"
+        "• 🤖 Status Sistem - Info bot",
         parse_mode='Markdown')
+
+@bot.message_handler(commands=['winrate'])
+def winrate_command(message):
+    """Command untuk melihat winrate"""
+    send_winrate(message)
+
+def send_winrate(message):
+    """Mengirim laporan winrate"""
+    try:
+        loading_msg = bot.send_message(message.chat.id, "⏳ _Menghitung statistik..._", parse_mode='Markdown')
+        
+        stats = calculate_winrate()
+        
+        if not stats or stats['total'] == 0:
+            bot.edit_message_text(
+                "📊 *BELUM ADA DATA TRADE CLOSE*\n\n"
+                "Belum ada histori trade yang sudah close.\n"
+                "Tunggu hingga ada posisi yang mencapai TP atau SL.",
+                chat_id=message.chat.id,
+                message_id=loading_msg.message_id,
+                parse_mode='Markdown'
+            )
+            return
+        
+        # Format laporan
+        report = f"📊 *LAPORAN WINRATE*\n━━━━━━━━━━━━━━━━━━━━━\n\n"
+        report += f"📈 *Total Sinyal Close:* {stats['total']}\n"
+        report += f"✅ *Win (TP):* {stats['wins']}\n"
+        report += f"❌ *Loss (SL):* {stats['losses']}\n"
+        report += f"━━━━━━━━━━━━━━━━━━━━━\n"
+        report += f"🎯 *WIN RATE:* **{stats['winrate']:.2f}%**\n\n"
+        
+        report += f"💰 *Rata-rata Profit:* +{stats['avg_profit']:.2f}%\n"
+        report += f"💰 *Rata-rata Loss:* {stats['avg_loss']:.2f}%\n"
+        report += f"📊 *Profit Factor:* {stats['profit_factor']:.2f}\n"
+        report += f"📈 *Net Profit:* {stats['net_profit']:+.2f}%\n\n"
+        
+        report += f"🏆 *Best Trade:* +{stats['best_trade']:.2f}%\n"
+        report += f"📉 *Worst Trade:* {stats['worst_trade']:.2f}%\n\n"
+        
+        if stats['top_coins']:
+            report += "🪙 *Top 5 Koin Terbaik:*\n"
+            for coin, data in stats['top_coins']:
+                report += f"• {coin}: {data['wins']}/{data['total']} ({data['winrate']:.1f}%)\n"
+        
+        try:
+            bot.delete_message(message.chat.id, loading_msg.message_id)
+        except:
+            pass
+        
+        bot.send_message(message.chat.id, report, parse_mode='Markdown')
+        
+    except Exception as e:
+        print(f"❌ Winrate error: {e}")
+        bot.reply_to(message, f"❌ Error: `{str(e)}`", parse_mode='Markdown')
 
 @bot.message_handler(commands=['test_api'])
 def test_api_command(message):
@@ -452,58 +593,38 @@ def test_api_command(message):
     except Exception as e:
         bot.reply_to(message, f"❌ Error: `{str(e)}`", parse_mode='Markdown')
 
-@bot.message_handler(commands=['test_ohlcv'])
-def test_ohlcv_command(message):
-    try:
-        args = message.text.split()
-        if len(args) < 2:
-            bot.reply_to(message, "⚠️ Format: `/test_ohlcv <SYMBOL>`\nContoh: `/test_ohlcv BTC`", parse_mode='Markdown')
-            return
-        coin = args[1].upper().strip()
-        symbol = f"{coin}-USDT-SWAP"
-        
-        bot.reply_to(message, f"⏳ _Mengambil data OHLCV untuk {symbol}..._", parse_mode='Markdown')
-        
-        candles = fetch_ohlcv_from_okx(symbol, timeframe='15m', limit=10)
-        
-        if candles and len(candles) > 0:
-            text = f"📊 *OHLCV DATA UNTUK {coin}*\n━━━━━━━━━━━━━━━━━━━━━\n"
-            for candle in candles[-5:]:  # Show last 5 candles
-                ts = time.strftime('%H:%M', time.localtime(candle[0]/1000))
-                text += f"`{ts} | O:{candle[1]:.2f} H:{candle[2]:.2f} L:{candle[3]:.2f} C:{candle[4]:.2f}`\n"
-            bot.reply_to(message, text, parse_mode='Markdown')
-        else:
-            bot.reply_to(message, f"❌ *Gagal mengambil data OHLCV untuk {symbol}*", parse_mode='Markdown')
-            
-    except Exception as e:
-        bot.reply_to(message, f"❌ Error: `{str(e)}`", parse_mode='Markdown')
-
 @bot.message_handler(func=lambda msg: True)
 def handle_reply_keyboard(message):
     text = message.text
-    if text == "🔍 Pantauan Koin":
-        bot.send_message(message.chat.id, "📂 *Pilih kategori:*", parse_mode='Markdown', reply_markup=pairs_category_keyboard())
-    elif text == "🎯 Setup Aktif (/pola)":
+    if text == "🎯 Setup Aktif":
         send_active_patterns(message)
     elif text == "📊 Posisi Open":
         send_open_positions(message)
     elif text == "📜 Histori Trade":
         send_trade_history(message)
+    elif text == "📈 Winrate":
+        send_winrate(message)
     elif text == "🤖 Status Sistem":
         db_type = "PostgreSQL (Railway)" if DATABASE_URL else "SQLite (Fallback)"
-        bot.reply_to(message, f"✅ *Bot Status:* Online.\n📊 *Engine:* Memantau {len(active_pairs)} koin.\n🗄️ *Database:* {db_type}", parse_mode='Markdown')
+        bot.reply_to(message, 
+            f"✅ *Bot Status:* Online\n"
+            f"📊 *Engine:* Memantau {len(active_pairs)} koin\n"
+            f"🗄️ *Database:* {db_type}\n"
+            f"🔄 *Mode:* Direct API (No CCXT)",
+            parse_mode='Markdown')
 
 def send_active_patterns(message):
     waiting_retest = [s for s, d in pair_states.items() if d['status'] in ['BREAKOUT_BULLISH', 'BREAKOUT_BEARISH']]
     if not waiting_retest:
-        bot.send_message(message.chat.id, "⏳ *Bersih.* Tidak ada setup.", parse_mode='Markdown')
+        bot.send_message(message.chat.id, "⏳ *Bersih.* Tidak ada setup menunggu retest.", parse_mode='Markdown')
         return
-    text = "🎯 *Setup Menunggu Retest:*\n\n"
+    text = "🎯 *Setup Menunggu Retest:*\n━━━━━━━━━━━━━━━━━━━━━\n\n"
     for symbol in waiting_retest:
         status = pair_states[symbol]['status']
         level = pair_states[symbol]['level']
         emoji = "🚀 LONG" if "BULLISH" in status else "💥 SHORT"
-        text += f"• *{symbol.replace('-USDT-SWAP','')}*: {emoji} | Key: `{level}`\n"
+        coin = symbol.replace('-USDT-SWAP', '').replace('-SWAP', '')
+        text += f"• *{coin}*: {emoji} | Key: `{level:.4f}`\n"
     bot.send_message(message.chat.id, text, parse_mode='Markdown')
 
 def send_open_positions(message):
@@ -534,13 +655,11 @@ def send_open_positions(message):
                 if entry <= 0 or sl <= 0 or tp <= 0:
                     continue
                 
-                # Get current price from OKX API
                 current_price = entry
                 price = fetch_price_from_okx(symbol)
                 if price and price > 0:
                     current_price = price
                 
-                # Calculate PnL
                 if tipe.upper() == 'LONG':
                     pnl_pct = ((current_price - entry) / entry) * 100
                     emoji = "🟢 LONG"
@@ -586,15 +705,15 @@ def send_open_positions(message):
 def send_trade_history(message):
     history = get_recent_history(10)
     if not history:
-        bot.send_message(message.chat.id, "📜 *Belum ada histori.*", parse_mode='Markdown')
+        bot.send_message(message.chat.id, "📜 *Belum ada histori transaksi.*", parse_mode='Markdown')
         return
     
     messages = []
-    current_msg = f"📜 *HISTORI ({len(history)}):*\n━━━━━━━━━━━━━━━━━━━━━\n"
+    current_msg = f"📜 *HISTORI TERAKHIR ({len(history)}):*\n━━━━━━━━━━━━━━━━━━━━━\n"
     
     for data in history:
         try:
-            coin = data['symbol'].replace('-USDT-SWAP', '')
+            coin = data['symbol'].replace('-USDT-SWAP', '').replace('-SWAP', '')
             tipe = data['type']
             entry = data['entry']
             exit_price = data['exit']
@@ -604,7 +723,7 @@ def send_trade_history(message):
             else:
                 pnl_pct = ((entry - exit_price) / entry) * 100
             
-            emoji = "🟢" if data['result'] == 'TP' else "🔴"
+            emoji = "🟢" if data['result'] in ['TP', 'WIN', 'PROFIT'] else "🔴"
             result_text = f"{emoji} *{data['result']}* ({pnl_pct:+.2f}%)"
             
             pos_text = (
@@ -623,28 +742,14 @@ def send_trade_history(message):
             print(f"Error: {e}")
             continue
     
-    if current_msg and current_msg != f"📜 *HISTORI ({len(history)}):*\n━━━━━━━━━━━━━━━━━━━━━\n":
+    if current_msg and current_msg != f"📜 *HISTORI TERAKHIR ({len(history)}):*\n━━━━━━━━━━━━━━━━━━━━━\n":
         messages.append(current_msg)
     
     for msg in messages:
         bot.send_message(message.chat.id, msg, parse_mode='Markdown')
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith('cat_'))
-def handle_category_selection(call):
-    if call.data == "cat_top50":
-        pairs = ", ".join([p.replace('-USDT-SWAP', '') for p in active_pairs])
-        text = f"🔥 *Top 50:*\n\n`{pairs}`"
-    elif call.data == "cat_majors":
-        text = "💎 *Majors:*\n\n`BTC, ETH, SOL, XRP, ADA, LTC, LINK, DOT`"
-    elif call.data == "cat_l1":
-        text = "🌐 *Layer 1:*\n\n`AVAX, ATOM, NEAR, FTM, SUI, APT, INJ, SEI`"
-    elif call.data == "cat_memes":
-        text = "🚀 *Meme & Alts:*\n\n`DOGE, SHIB, PEPE, WIF, BONK, FLOKI, GALA, OP, ARB`"
-    bot.edit_message_text(text, chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode='Markdown', reply_markup=pairs_category_keyboard())
-    bot.answer_callback_query(call.id)
-
 # =======================================================
-# 🔍 SCANNER (MENGGUNAKAN OKX API TANPA CCXT)
+# 🔍 SCANNER
 # =======================================================
 
 def scan_breakout_retest(symbol):
@@ -653,7 +758,6 @@ def scan_breakout_retest(symbol):
         if not symbol:
             return
         
-        # Fetch candles langsung dari OKX API
         candles = fetch_ohlcv_from_okx(symbol, timeframe=TIMEFRAME_LIVE, limit=100)
         if not candles or len(candles) < CANDLE_COUNT:
             return
@@ -680,7 +784,14 @@ def scan_breakout_retest(symbol):
             
             if current_low <= sl:
                 pnl = ((sl - entry) / entry) * 100
-                bot.send_message(TELEGRAM_CHAT_ID, f"🔴 *STOP LOSS*\n{symbol.replace('-USDT-SWAP', '')}\nEntry: {entry:.4f}\nExit: {sl:.4f}\nPnL: {pnl:.2f}%", parse_mode='Markdown')
+                bot.send_message(TELEGRAM_CHAT_ID, 
+                    f"🔴 *STOP LOSS*\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"Pair: `{symbol.replace('-USDT-SWAP', '')}`\n"
+                    f"📥 Entry: `{entry:.4f}`\n"
+                    f"🚪 Exit: `{sl:.4f}`\n"
+                    f"📉 PnL: *{pnl:.2f}%*",
+                    parse_mode='Markdown')
                 if symbol in open_trades:
                     insert_trade_history(symbol, 'LONG', entry, sl, 'SL', waktu)
                     delete_open_trade(symbol)
@@ -688,7 +799,14 @@ def scan_breakout_retest(symbol):
                 return
             elif current_high >= tp:
                 pnl = ((tp - entry) / entry) * 100
-                bot.send_message(TELEGRAM_CHAT_ID, f"🟢 *TAKE PROFIT*\n{symbol.replace('-USDT-SWAP', '')}\nEntry: {entry:.4f}\nExit: {tp:.4f}\nPnL: +{pnl:.2f}%", parse_mode='Markdown')
+                bot.send_message(TELEGRAM_CHAT_ID, 
+                    f"🟢 *TAKE PROFIT*\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"Pair: `{symbol.replace('-USDT-SWAP', '')}`\n"
+                    f"📥 Entry: `{entry:.4f}`\n"
+                    f"🚪 Exit: `{tp:.4f}`\n"
+                    f"📈 PnL: *+{pnl:.2f}%*",
+                    parse_mode='Markdown')
                 if symbol in open_trades:
                     insert_trade_history(symbol, 'LONG', entry, tp, 'TP', waktu)
                     delete_open_trade(symbol)
@@ -705,7 +823,14 @@ def scan_breakout_retest(symbol):
             
             if current_high >= sl:
                 pnl = ((entry - sl) / entry) * 100
-                bot.send_message(TELEGRAM_CHAT_ID, f"🔴 *STOP LOSS*\n{symbol.replace('-USDT-SWAP', '')}\nEntry: {entry:.4f}\nExit: {sl:.4f}\nPnL: {pnl:.2f}%", parse_mode='Markdown')
+                bot.send_message(TELEGRAM_CHAT_ID, 
+                    f"🔴 *STOP LOSS*\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"Pair: `{symbol.replace('-USDT-SWAP', '')}`\n"
+                    f"📥 Entry: `{entry:.4f}`\n"
+                    f"🚪 Exit: `{sl:.4f}`\n"
+                    f"📉 PnL: *{pnl:.2f}%*",
+                    parse_mode='Markdown')
                 if symbol in open_trades:
                     insert_trade_history(symbol, 'SHORT', entry, sl, 'SL', waktu)
                     delete_open_trade(symbol)
@@ -713,7 +838,14 @@ def scan_breakout_retest(symbol):
                 return
             elif current_low <= tp:
                 pnl = ((entry - tp) / entry) * 100
-                bot.send_message(TELEGRAM_CHAT_ID, f"🟢 *TAKE PROFIT*\n{symbol.replace('-USDT-SWAP', '')}\nEntry: {entry:.4f}\nExit: {tp:.4f}\nPnL: +{pnl:.2f}%", parse_mode='Markdown')
+                bot.send_message(TELEGRAM_CHAT_ID, 
+                    f"🟢 *TAKE PROFIT*\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"Pair: `{symbol.replace('-USDT-SWAP', '')}`\n"
+                    f"📥 Entry: `{entry:.4f}`\n"
+                    f"🚪 Exit: `{tp:.4f}`\n"
+                    f"📈 PnL: *+{pnl:.2f}%*",
+                    parse_mode='Markdown')
                 if symbol in open_trades:
                     insert_trade_history(symbol, 'SHORT', entry, tp, 'TP', waktu)
                     delete_open_trade(symbol)
@@ -744,7 +876,13 @@ def scan_breakout_retest(symbol):
         if prev_close > resistance and vol_valid and current_close > ema200 and rsi < 70:
             if pair_states[symbol]['status'] != 'BREAKOUT_BULLISH':
                 pair_states[symbol] = {'status': 'BREAKOUT_BULLISH', 'level': resistance, 'sl': support, 'tp': 0.0}
-                bot.send_message(TELEGRAM_CHAT_ID, f"🚀 *BULLISH BREAKOUT*\n{symbol.replace('-USDT-SWAP', '')}\nLevel: {resistance:.4f}\nWaiting retest...", parse_mode='Markdown')
+                bot.send_message(TELEGRAM_CHAT_ID, 
+                    f"🚀 *BULLISH BREAKOUT*\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"Pair: `{symbol.replace('-USDT-SWAP', '')}`\n"
+                    f"📊 Level: `{resistance:.4f}`\n"
+                    f"⏳ *Menunggu konfirmasi retest...*",
+                    parse_mode='Markdown')
         
         elif pair_states[symbol]['status'] == 'BREAKOUT_BULLISH':
             target = pair_states[symbol]['level']
@@ -763,13 +901,27 @@ def scan_breakout_retest(symbol):
                 
                 atr = calculate_atr(candles, period=14)
                 atr_info = f"ATR14={atr:.4f}" if atr > 0 else "ATR=N/A"
-                bot.send_message(TELEGRAM_CHAT_ID, f"🎯 *ENTRY LONG*\n{symbol.replace('-USDT-SWAP', '')}\nEntry: {current_close:.4f}\nSL: {sl:.4f} ({method})\nTP: {tp:.4f}\n{atr_info}", parse_mode='Markdown')
+                bot.send_message(TELEGRAM_CHAT_ID, 
+                    f"🎯 *ENTRY LONG CONFIRMED*\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"Pair: `{symbol.replace('-USDT-SWAP', '')}`\n"
+                    f"📥 Entry: `{current_close:.4f}`\n"
+                    f"🛑 SL: `{sl:.4f}` ({method})\n"
+                    f"🎯 TP: `{tp:.4f}`\n"
+                    f"📊 {atr_info}",
+                    parse_mode='Markdown')
         
         # BEARISH
         elif prev_close < support and vol_valid and current_close < ema200 and rsi > 30:
             if pair_states[symbol]['status'] != 'BREAKOUT_BEARISH':
                 pair_states[symbol] = {'status': 'BREAKOUT_BEARISH', 'level': support, 'sl': resistance, 'tp': 0.0}
-                bot.send_message(TELEGRAM_CHAT_ID, f"💥 *BEARISH BREAKDOWN*\n{symbol.replace('-USDT-SWAP', '')}\nLevel: {support:.4f}\nWaiting retest...", parse_mode='Markdown')
+                bot.send_message(TELEGRAM_CHAT_ID, 
+                    f"💥 *BEARISH BREAKDOWN*\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"Pair: `{symbol.replace('-USDT-SWAP', '')}`\n"
+                    f"📊 Level: `{support:.4f}`\n"
+                    f"⏳ *Menunggu konfirmasi retest...*",
+                    parse_mode='Markdown')
         
         elif pair_states[symbol]['status'] == 'BREAKOUT_BEARISH':
             target = pair_states[symbol]['level']
@@ -788,7 +940,15 @@ def scan_breakout_retest(symbol):
                 
                 atr = calculate_atr(candles, period=14)
                 atr_info = f"ATR14={atr:.4f}" if atr > 0 else "ATR=N/A"
-                bot.send_message(TELEGRAM_CHAT_ID, f"🎯 *ENTRY SHORT*\n{symbol.replace('-USDT-SWAP', '')}\nEntry: {current_close:.4f}\nSL: {sl:.4f} ({method})\nTP: {tp:.4f}\n{atr_info}", parse_mode='Markdown')
+                bot.send_message(TELEGRAM_CHAT_ID, 
+                    f"🎯 *ENTRY SHORT CONFIRMED*\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"Pair: `{symbol.replace('-USDT-SWAP', '')}`\n"
+                    f"📥 Entry: `{current_close:.4f}`\n"
+                    f"🛑 SL: `{sl:.4f}` ({method})\n"
+                    f"🎯 TP: `{tp:.4f}`\n"
+                    f"📊 {atr_info}",
+                    parse_mode='Markdown')
         
         # Reset if breakout fails
         if pair_states[symbol]['status'] == 'BREAKOUT_BULLISH':
@@ -816,7 +976,6 @@ def main():
     
     init_db()
     
-    # Set fallback pairs
     global active_pairs
     active_pairs = [
         'BTC-USDT-SWAP', 'ETH-USDT-SWAP', 'SOL-USDT-SWAP', 'XRP-USDT-SWAP', 'ADA-USDT-SWAP',
@@ -871,7 +1030,6 @@ def main():
     except Exception as e:
         print(f"❌ Startup message error: {e}")
     
-    # Main loop
     print("🔄 Starting scan loop...")
     while True:
         for symbol in active_pairs:
