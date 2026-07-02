@@ -518,7 +518,7 @@ def send_welcome(message):
 
 @bot.message_handler(commands=['backtest_tf'])
 def handle_backtest_tf_command(message):
-    """Backtest dengan timeframe yang dipilih (Fleksibel)"""
+    """Backtest dengan timeframe yang dipilih (Fleksibel + Debug)"""
     try:
         args = message.text.split()
         if len(args) < 3:
@@ -529,13 +529,21 @@ def handle_backtest_tf_command(message):
                 "`/backtest_tf PEPE 4h`\n"
                 "`/backtest_tf ETH 15m`\n\n"
                 "📊 *Timeframe yang tersedia:*\n"
-                "`1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d, 1w`",
+                "`1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d, 1w`\n\n"
+                "🔧 *Parameter (bisa ditambah):*\n"
+                "`/backtest_tf BTC 1h loose` - Mode longgar\n"
+                "`/backtest_tf BTC 1h tight` - Mode ketat",
                 parse_mode='Markdown'
             )
             return
 
         coin_name = args[1].upper().strip()
         timeframe = args[2].lower().strip()
+        
+        # Cek mode (opsional)
+        mode = 'normal'
+        if len(args) >= 4:
+            mode = args[3].lower().strip()
         
         # Validasi timeframe
         valid_tf = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '12h', '1d', '1w']
@@ -548,7 +556,7 @@ def handle_backtest_tf_command(message):
             return
 
         symbol = f"{coin_name}-USDT-SWAP"
-        loading_msg = bot.reply_to(message, f"⏳ _Backtest {symbol} - Timeframe: {timeframe}..._", parse_mode='Markdown')
+        loading_msg = bot.reply_to(message, f"⏳ _Backtest {symbol} - Timeframe: {timeframe} (Mode: {mode})..._", parse_mode='Markdown')
 
         # Sesuaikan limit berdasarkan timeframe
         if timeframe in ['1m', '3m', '5m']:
@@ -569,14 +577,43 @@ def handle_backtest_tf_command(message):
             )
             return
 
+        # ========== PARAMETER BACKTEST (FLEKSIBEL) ==========
+        if mode == 'loose':
+            # Mode longgar - banyak sinyal
+            vol_multiplier = 1.2
+            rsi_bullish = 70
+            rsi_bearish = 30
+            retest_range = 1.01
+            rejection_ratio = 0.5
+            rr_ratio = 1.5
+            ema_period = 20
+        elif mode == 'tight':
+            # Mode ketat - sinyal berkualitas
+            vol_multiplier = 2.0
+            rsi_bullish = 40
+            rsi_bearish = 60
+            retest_range = 1.002
+            rejection_ratio = 1.5
+            rr_ratio = 2.5
+            ema_period = 50
+        else:
+            # Mode normal
+            vol_multiplier = 1.5
+            rsi_bullish = 55
+            rsi_bearish = 45
+            retest_range = 1.005
+            rejection_ratio = 1.0
+            rr_ratio = 2.0
+            ema_period = 30
+
         # ========== BACKTEST ENGINE ==========
         total_trades, wins, losses = 0, 0, 0
         state = 'NONE'
         trigger_level, sl_level, tp_level = 0.0, 0.0, 0.0
         trade_list = []
         signal_list = []
+        debug_info = []  # Untuk debugging
 
-        # Mulai dari candle ke-50 untuk memastikan data cukup
         start_idx = min(50, len(candles) // 4)
         
         for i in range(start_idx, len(candles)):
@@ -586,9 +623,8 @@ def handle_backtest_tf_command(message):
             current_open = current_candle[1]
             prev_close = prev_candle[4]
             
-            # Histori candle untuk support/resistance (30 candle terakhir)
             hist_candles = candles[i - 30 : i - 1] if i >= 30 else candles[:i-1]
-            if not hist_candles or len(hist_candles) < 20:
+            if not hist_candles or len(hist_candles) < 15:
                 continue
             
             resistance = max([c[2] for c in hist_candles])
@@ -596,13 +632,10 @@ def handle_backtest_tf_command(message):
             
             avg_volume = sum([c[5] for c in hist_candles]) / len(hist_candles)
             breakout_volume = candles[i-1][5]
-            
-            # Parameter backtest (bisa disesuaikan)
-            vol_multiplier = 1.5  # Volume harus 1.5x dari rata-rata
             volume_valid = breakout_volume > (avg_volume * vol_multiplier)
             
             local_closes = [c[4] for c in candles[:i]]
-            current_ema = calculate_ema(local_closes, period=50)  # EMA 50
+            current_ema = calculate_ema(local_closes, period=ema_period)
             current_rsi = calculate_rsi(local_closes, period=14)
 
             if not current_ema or not current_rsi:
@@ -611,7 +644,7 @@ def handle_backtest_tf_command(message):
             # ========== STATE MACHINE ==========
             if state == 'NONE':
                 # BULLISH BREAKOUT
-                if prev_close > resistance and volume_valid and current_close > current_ema and current_rsi < 60:
+                if prev_close > resistance and volume_valid and current_close > current_ema and current_rsi < rsi_bullish:
                     state = 'BREAKOUT_BULLISH'
                     trigger_level = resistance
                     signal_list.append({
@@ -620,8 +653,10 @@ def handle_backtest_tf_command(message):
                         'price': current_close,
                         'time': i
                     })
+                    debug_info.append(f"✅ Bullish breakout at {i}: RSI={current_rsi:.1f}, Vol={breakout_volume/avg_volume:.2f}x")
+                
                 # BEARISH BREAKDOWN
-                elif prev_close < support and volume_valid and current_close < current_ema and current_rsi > 40:
+                elif prev_close < support and volume_valid and current_close < current_ema and current_rsi > rsi_bearish:
                     state = 'BREAKOUT_BEARISH'
                     trigger_level = support
                     signal_list.append({
@@ -630,22 +665,23 @@ def handle_backtest_tf_command(message):
                         'price': current_close,
                         'time': i
                     })
+                    debug_info.append(f"✅ Bearish breakdown at {i}: RSI={current_rsi:.1f}, Vol={breakout_volume/avg_volume:.2f}x")
 
             elif state == 'BREAKOUT_BULLISH':
                 body_size = abs(current_close - current_open)
                 lower_wick = min(current_open, current_close) - current_low
                 
-                retest_touched = current_low <= trigger_level * 1.005
-                retest_held = current_close > trigger_level * 0.995
-                rejection_valid = current_close > current_open and lower_wick > (body_size * 0.8)
+                retest_touched = current_low <= trigger_level * retest_range
+                retest_held = current_close > trigger_level * (2 - retest_range)
+                rejection_valid = current_close > current_open and lower_wick > (body_size * rejection_ratio)
                 
                 if retest_touched and retest_held and rejection_valid:
                     state = 'IN_LONG'
-                    sl_level = support * 0.998
+                    sl_level = support * 0.995
                     risk = current_close - sl_level
                     if risk <= 0: 
                         risk = current_close * 0.005
-                    tp_level = current_close + (risk * 2)  # Risk Reward 2:1
+                    tp_level = current_close + (risk * rr_ratio)
                     total_trades += 1
                     trade_list.append({
                         'entry': current_close,
@@ -654,24 +690,24 @@ def handle_backtest_tf_command(message):
                         'type': 'LONG',
                         'time': i
                     })
-                elif current_close < trigger_level * 0.99:
+                elif current_close < trigger_level * (2 - retest_range):
                     state = 'NONE'
 
             elif state == 'BREAKOUT_BEARISH':
                 body_size = abs(current_close - current_open)
                 upper_wick = current_high - max(current_open, current_close)
                 
-                retest_touched = current_high >= trigger_level * 0.995
-                retest_held = current_close < trigger_level * 1.005
-                rejection_valid = current_close < current_open and upper_wick > (body_size * 0.8)
+                retest_touched = current_high >= trigger_level * (2 - retest_range)
+                retest_held = current_close < trigger_level * retest_range
+                rejection_valid = current_close < current_open and upper_wick > (body_size * rejection_ratio)
                 
                 if retest_touched and retest_held and rejection_valid:
                     state = 'IN_SHORT'
-                    sl_level = resistance * 1.002
+                    sl_level = resistance * 1.005
                     risk = sl_level - current_close
                     if risk <= 0: 
                         risk = current_close * 0.005
-                    tp_level = current_close - (risk * 2)
+                    tp_level = current_close - (risk * rr_ratio)
                     total_trades += 1
                     trade_list.append({
                         'entry': current_close,
@@ -680,7 +716,7 @@ def handle_backtest_tf_command(message):
                         'type': 'SHORT',
                         'time': i
                     })
-                elif current_close > trigger_level * 1.01:
+                elif current_close > trigger_level * retest_range:
                     state = 'NONE'
 
             elif state == 'IN_LONG':
@@ -702,7 +738,6 @@ def handle_backtest_tf_command(message):
         # ========== HITUNG STATISTIK ==========
         winrate = (wins / total_trades * 100) if total_trades > 0 else 0.0
         
-        # Hitung profit/loss detail
         total_profit = 0
         total_loss = 0
         for trade in trade_list:
@@ -727,6 +762,7 @@ def handle_backtest_tf_command(message):
                 f"━━━━━━━━━━━━━━━━━━━━━\n"
                 f"🔹 *Aset:* `{symbol}`\n"
                 f"🔹 *Timeframe:* `{timeframe}`\n"
+                f"🔹 *Mode:* `{mode}`\n"
                 f"🔹 *Periode:* {len(candles)} candle\n"
                 f"━━━━━━━━━━━━━━━━━━━━━\n"
                 f"📈 *Total Sinyal:* `{total_trades}`\n"
@@ -740,18 +776,19 @@ def handle_backtest_tf_command(message):
                 f"📈 *Net Profit:* `{total_profit - total_loss:+.2f}%`\n\n"
             )
             
-            # Tampilkan 5 sinyal terakhir
             if trade_list:
                 report_text += "📋 *5 Sinyal Terakhir:*\n"
                 for idx, trade in enumerate(trade_list[-5:], 1):
-                    pnl_pct = ((trade['tp'] - trade['entry']) / trade['entry']) * 100 if trade['type'] == 'LONG' else ((trade['entry'] - trade['tp']) / trade['entry']) * 100
+                    if trade['type'] == 'LONG':
+                        pnl_pct = ((trade['tp'] - trade['entry']) / trade['entry']) * 100
+                    else:
+                        pnl_pct = ((trade['entry'] - trade['tp']) / trade['entry']) * 100
                     emoji = "🟢" if pnl_pct > 0 else "🔴"
                     report_text += (
                         f"{idx}. {trade['type']} | Entry: `{trade['entry']:.4f}` | "
                         f"SL: `{trade['sl']:.4f}` | TP: `{trade['tp']:.4f}` | {emoji} {pnl_pct:+.1f}%\n"
                     )
             
-            # Analisis dan saran
             report_text += f"\n━━━━━━━━━━━━━━━━━━━━━\n"
             if winrate >= 60:
                 report_text += "✅ *Analisis:* WINRATE SANGAT BAGUS! Lanjutkan strategi ini."
@@ -763,20 +800,24 @@ def handle_backtest_tf_command(message):
                 report_text += "❌ *Analisis:* WINRATE SANGAT RENDAH. Coba pair atau timeframe lain."
                 
         else:
+            # Tampilkan debug info
+            debug_text = "\n".join(debug_info[-10:]) if debug_info else "Tidak ada breakout terdeteksi"
             report_text = (
                 f"📊 *LAPORAN BACKTEST*\n"
                 f"━━━━━━━━━━━━━━━━━━━━━\n"
                 f"🔹 *Aset:* `{symbol}`\n"
                 f"🔹 *Timeframe:* `{timeframe}`\n"
+                f"🔹 *Mode:* `{mode}`\n"
                 f"🔹 *Total candle:* {len(candles)}\n"
                 f"━━━━━━━━━━━━━━━━━━━━━\n"
-                f"❌ *Tidak ada sinyal valid ditemukan*\n\n"
+                f"❌ *Tidak ada sinyal valid*\n\n"
+                f"🔍 *Debug (10 breakout terakhir):*\n"
+                f"`{debug_text}`\n\n"
                 f"💡 *Saran:*\n"
-                f"• Coba timeframe lebih besar (1h, 4h)\n"
-                f"• Coba pair dengan volatilitas tinggi\n"
-                f"• Periksa apakah pasar sedang trending\n"
-                f"• Gunakan `/backtest_tf {coin_name} 1h`\n"
-                f"• Gunakan `/backtest_tf {coin_name} 4h`"
+                f"• Coba mode `loose`: `/backtest_tf {coin_name} {timeframe} loose`\n"
+                f"• Coba timeframe lebih besar: `/backtest_tf {coin_name} 1h`\n"
+                f"• Coba pair lain dengan volatilitas tinggi\n"
+                f"• Periksa apakah pasar sedang trending"
             )
         
         try: 
@@ -793,7 +834,7 @@ def handle_backtest_tf_command(message):
             pass
         bot.reply_to(message, f"❌ *Error Backtest:* `{str(e)}`", parse_mode='Markdown')
         import traceback
-        traceback.print_exc()
+        traceback.print_exc()                    
 
 @bot.message_handler(commands=['backtest_help'])
 def backtest_help_command(message):
